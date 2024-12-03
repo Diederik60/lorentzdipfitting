@@ -142,20 +142,21 @@ class ODMRAnalyzer:
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
-        Fit single pixel data using logarithmic scale optimization with curve_fit
+        Fit single pixel data using logarithmic scale optimization
         """
         # Normalize data to improve numerical stability
         scale_factor = np.max(np.abs(pixel_data))
         pixel_data_norm = pixel_data / scale_factor
         
-        # Add small offset to avoid log(0)
-        epsilon = 1e-10
-        log_data = np.log(pixel_data_norm + epsilon)
-        
-        # Initial parameter estimation
+        # Initial parameter estimation in linear space
+        # Baseline estimation using edges of spectrum
         edge_points = np.concatenate([pixel_data_norm[:5], pixel_data_norm[-5:]])
         I0_est = np.mean(edge_points)
+        
+        # Amplitude estimation from data range
         A_est = np.ptp(pixel_data_norm) * 0.5
+        
+        # Frequency range
         freq_range = freq_axis[-1] - freq_axis[0]
         
         # Find dips
@@ -173,6 +174,7 @@ class ODMRAnalyzer:
             f_center_est = f_dip
             f_delta_est = freq_range * 0.1
         else:
+            # Use two deepest dips
             peak_depths = inverted[peaks]
             two_deepest = peaks[np.argsort(peak_depths)[-2:]]
             f_dip_1 = freq_axis[two_deepest[0]]
@@ -182,80 +184,48 @@ class ODMRAnalyzer:
             f_delta_est = abs(f_dip_2 - f_dip_1)
         
         # Convert to log space for parameters that must be positive
-        log_I0_est = np.log(max(I0_est, epsilon))
-        log_A_est = np.log(max(A_est, epsilon))
-        log_width_est = np.log(max(width_est, epsilon))
+        log_I0_est = np.log(max(I0_est, 1e-10))
+        log_A_est = np.log(max(A_est, 1e-10))
+        log_width_est = np.log(max(width_est, 1e-10))
         
-        # Initial parameter vector in mixed space (log space for positive parameters)
+        # Initial parameter vector in log space
         p0 = [log_I0_est, log_A_est, log_width_est, f_center_est, f_delta_est]
         
-        # Set bounds for TRF method
-        if method == 'trf':
-            # Bounds in log space for positive parameters
-            bounds = ([
-                np.log(epsilon),          # log_I0 lower
-                np.log(epsilon),          # log_A lower
-                np.log(freq_range*1e-4),  # log_width lower
-                freq_axis[0],             # f_center lower (linear space)
-                0                         # f_delta lower (linear space)
-            ], [
-                np.log(1e2),             # log_I0 upper
-                np.log(1e2),             # log_A upper
-                np.log(freq_range),       # log_width upper
-                freq_axis[-1],           # f_center upper (linear space)
-                freq_range               # f_delta upper (linear space)
-            ])
-        else:
-            bounds = (-np.inf, np.inf)
+        # Define the error function for optimization
+        def error_func(params):
+            # Get predicted values using log-space parameters
+            predicted = ODMRAnalyzer.double_dip_func_log(freq_axis, *params)
+            # Calculate logarithmic mean square error
+            # Add small constant to avoid log(0)
+            log_actual = np.log(pixel_data_norm + 1e-10)
+            log_predicted = np.log(predicted + 1e-10)
+            return np.mean((log_actual - log_predicted)**2)
         
         try:
-            # Fit using curve_fit with logarithmic parameters
-            if method == 'trf':
-                popt, pcov = curve_fit(
-                    ODMRAnalyzer.double_dip_func_log,
-                    freq_axis,
-                    pixel_data_norm,
-                    p0=p0,
-                    bounds=bounds,
-                    method='trf',
-                    maxfev=3000,
-                    ftol=1e-4,
-                    xtol=1e-4
-                )
-            else:
-                popt, pcov = curve_fit(
-                    ODMRAnalyzer.double_dip_func_log,
-                    freq_axis,
-                    pixel_data_norm,
-                    p0=p0,
-                    method='lm',
-                    maxfev=3000
-                )
+            from scipy.optimize import minimize
             
-            # Convert optimized parameters back to linear space and original scale
+            # Use minimize instead of curve_fit for more control over the optimization
+            result = minimize(
+                error_func,
+                p0,
+                method='Nelder-Mead',  # Robust method that doesn't require derivatives
+                options={'maxiter': 5000, 'xatol': 1e-8, 'fatol': 1e-8}
+            )
+            
+            if not result.success:
+                print(f"Optimization failed: {result.message}")
+                return default_values
+            
+            # Convert optimized parameters back to linear space
+            popt = result.x
+            
+            # Convert parameters back to original scale
             I0 = np.exp(popt[0]) * scale_factor
             A = np.exp(popt[1]) * scale_factor
             width = np.exp(popt[2])
             f_center = popt[3]
             f_delta = popt[4]
             
-            # Calculate fit quality in log space
-            fitted_curve = ODMRAnalyzer.double_dip_func_log(freq_axis, *popt)
-            log_fitted = np.log(fitted_curve + epsilon)
-            mse_log = np.mean((log_data - log_fitted)**2)
-            
-            # If fit is poor, return default values
-            if mse_log > 1.0:  # Threshold can be adjusted
-                if default_values is None:
-                    default_values = {
-                        "I0": np.mean(pixel_data),
-                        "A": np.ptp(pixel_data) * 0.1,
-                        "width": freq_range * 0.1,
-                        "f_center": np.mean(freq_axis),
-                        "f_delta": freq_range * 0.2
-                    }
-                return default_values
-                
             return {
                 "I0": I0,
                 "A": A,
