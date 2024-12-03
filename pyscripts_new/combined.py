@@ -382,7 +382,7 @@ class ODMRAnalyzer:
     def analyze_spectrum(self, x, y, fitted_params=None):
         """
         Comprehensive spectrum analysis for a specific pixel
-        
+
         Args:
             x (int): x-coordinate of pixel
             y (int): y-coordinate of pixel
@@ -407,12 +407,15 @@ class ODMRAnalyzer:
         # Additional analysis using fitted parameters if provided
         fitted_analysis = {}
         if fitted_params is not None:
+            # Calculate the row index from the pixel coordinates
+            row = x
+            
             fitted_analysis = {
-                'I0': fitted_params['I0'][x, y],
-                'amplitude': fitted_params['A'][x, y],
-                'width': fitted_params['width'][x, y],
-                'center_frequency': fitted_params['f_center'][x, y],
-                'frequency_splitting': fitted_params['f_delta'][x, y]
+                'I0': fitted_params['I0'][row],
+                'amplitude': fitted_params['A'][row],
+                'width': fitted_params['width'][row],
+                'center_frequency': fitted_params['f_center'][row],
+                'frequency_splitting': fitted_params['f_delta'][row]
             }
         
         return {
@@ -471,7 +474,7 @@ def main():
                 try:
 
                     pixel = analyzer.data[x, y, :]
-                    single_pixel_params = analyzer.fit_single_pixel(pixel)
+                    single_pixel_params = analyzer.fit_single_pixel(pixel, analyzer.freq_axis)
 
                     # Debug: Print the specific pixel data
                     # print(f"Pixel data shape: {pixel.shape}")
