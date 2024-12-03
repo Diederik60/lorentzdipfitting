@@ -140,7 +140,126 @@ class ODMRAnalyzer:
         
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
 
+
+    @staticmethod
+    def find_dips_robustly(freq_axis, pixel_data_norm):
+        """Helper method that looks for dips using multiple approaches"""
+        inverted = -pixel_data_norm
+        dips = []
         
+        # Try different prominence levels - start strict, then get more lenient
+        prominence_levels = [0.01, 0.005, 0.002]
+        for prominence in prominence_levels:
+            peaks, properties = find_peaks(inverted, prominence=prominence, 
+                                        width=2,  # Minimum width requirement
+                                        distance=3)  # Minimum separation
+            if len(peaks) >= 2:
+                # Sort by prominence and take top two
+                peak_prominences = properties['prominences']
+                sorted_indices = np.argsort(peak_prominences)[::-1]
+                peaks = peaks[sorted_indices]
+                dips = peaks[:2]
+                break
+            elif len(peaks) == 1 and len(dips) == 0:
+                dips = [peaks[0]]
+        
+        # If we still haven't found two dips, try with smoothed data
+        if len(dips) < 2:
+            smoothed = savgol_filter(pixel_data_norm, window_length=7, polyorder=3)
+            inverted_smooth = -smoothed
+            
+            for prominence in prominence_levels:
+                peaks, properties = find_peaks(inverted_smooth, prominence=prominence,
+                                            width=2, distance=3)
+                if len(peaks) >= 2:
+                    peak_prominences = properties['prominences']
+                    sorted_indices = np.argsort(peak_prominences)[::-1]
+                    peaks = peaks[sorted_indices]
+                    dips = peaks[:2]
+                    break
+                elif len(peaks) == 1 and len(dips) == 0:
+                    dips = [peaks[0]]
+        
+        return np.array(dips)
+
+    @staticmethod
+    def estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips):
+        """Helper method that makes smarter initial parameter estimates"""
+        freq_range = freq_axis[-1] - freq_axis[0]
+        
+        # Estimate baseline from highest points
+        sorted_data = np.sort(pixel_data_norm)
+        I0_est = np.mean(sorted_data[-int(len(sorted_data)*0.1):])
+        
+        if len(dips) >= 2:
+            # We found two dips - use their properties
+            f_dip_1 = freq_axis[dips[0]]
+            f_dip_2 = freq_axis[dips[1]]
+            
+            f_center_est = np.mean([f_dip_1, f_dip_2])
+            f_delta_est = abs(f_dip_2 - f_dip_1)
+            
+            # Estimate width from dip shapes
+            dip_depth = np.mean([I0_est - pixel_data_norm[dip] for dip in dips[:2]])
+            half_max_level = I0_est - dip_depth/2
+            
+            # Find typical width at half maximum
+            widths = []
+            for dip in dips[:2]:
+                left_idx = dip
+                while left_idx > 0 and pixel_data_norm[left_idx] < half_max_level:
+                    left_idx -= 1
+                
+                right_idx = dip
+                while right_idx < len(pixel_data_norm)-1 and pixel_data_norm[right_idx] < half_max_level:
+                    right_idx += 1
+                
+                widths.append(freq_axis[right_idx] - freq_axis[left_idx])
+            
+            width_est = np.mean(widths) * 0.5  # Convert FWHM to Lorentzian width
+            A_est = dip_depth
+            
+        elif len(dips) == 1:
+            # Single dip - check if it might be merged
+            dip_idx = dips[0]
+            f_dip = freq_axis[dip_idx]
+            
+            # Measure the dip width
+            dip_depth = I0_est - pixel_data_norm[dip_idx]
+            half_max_level = I0_est - dip_depth/2
+            
+            left_idx = dip_idx
+            while left_idx > 0 and pixel_data_norm[left_idx] < half_max_level:
+                left_idx -= 1
+            
+            right_idx = dip_idx
+            while right_idx < len(pixel_data_norm)-1 and pixel_data_norm[right_idx] < half_max_level:
+                right_idx += 1
+            
+            measured_width = freq_axis[right_idx] - freq_axis[left_idx]
+            
+            if measured_width > freq_range * 0.1:
+                # Probably merged dips
+                width_est = measured_width * 0.25
+                f_center_est = f_dip
+                f_delta_est = width_est * 2
+            else:
+                # Probably single dip
+                width_est = measured_width * 0.5
+                f_center_est = f_dip
+                f_delta_est = freq_range * 0.05
+            
+            A_est = dip_depth
+            
+        else:
+            # No clear dips - use conservative estimates
+            width_est = freq_range * 0.1
+            f_center_est = np.mean(freq_axis)
+            f_delta_est = freq_range * 0.2
+            A_est = np.ptp(pixel_data_norm) * 0.3
+        
+        return I0_est, A_est, width_est, f_center_est, f_delta_est
+
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
@@ -164,26 +283,33 @@ class ODMRAnalyzer:
         inverted = -pixel_data_norm
         peaks, _ = find_peaks(inverted, prominence=0.01)
         
-        # Initial parameter estimates with physical consideration
-        if len(peaks) == 0:
-            width_est = freq_range * 0.1
-            f_center_est = np.mean(freq_axis)
-            f_delta_est = freq_range * 0.2
-        elif len(peaks) == 1:
-            f_dip = freq_axis[peaks[0]]
-            width_est = freq_range * 0.05
-            f_center_est = f_dip
-            f_delta_est = freq_range * 0.1
-        else:
-            peak_depths = inverted[peaks]
-            two_deepest = peaks[np.argsort(peak_depths)[-2:]]
-            f_dip_1 = freq_axis[two_deepest[0]]
-            f_dip_2 = freq_axis[two_deepest[1]]
-            width_est = abs(f_dip_2 - f_dip_1) * 0.3
-            f_center_est = np.mean([f_dip_1, f_dip_2])
-            f_delta_est = abs(f_dip_2 - f_dip_1)
+        # # Initial parameter estimates with physical consideration
+        # if len(peaks) == 0:
+        #     width_est = freq_range * 0.1
+        #     f_center_est = np.mean(freq_axis)
+        #     f_delta_est = freq_range * 0.2
+        # elif len(peaks) == 1:
+        #     f_dip = freq_axis[peaks[0]]
+        #     width_est = freq_range * 0.05
+        #     f_center_est = f_dip
+        #     f_delta_est = freq_range * 0.1
+        # else:
+        #     peak_depths = inverted[peaks]
+        #     two_deepest = peaks[np.argsort(peak_depths)[-2:]]
+        #     f_dip_1 = freq_axis[two_deepest[0]]
+        #     f_dip_2 = freq_axis[two_deepest[1]]
+        #     width_est = abs(f_dip_2 - f_dip_1) * 0.3
+        #     f_center_est = np.mean([f_dip_1, f_dip_2])
+        #     f_delta_est = abs(f_dip_2 - f_dip_1)
         
-        # Convert all initial estimates to log space
+        # Find dips using robust method
+        dips = ODMRAnalyzer.find_dips_robustly(freq_axis, pixel_data_norm)
+        
+        # Get parameter estimates
+        I0_est, A_est, width_est, f_center_est, f_delta_est = \
+            ODMRAnalyzer.estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips)
+        
+        # Convert to log space (keep your existing log conversion code)
         log_I0_est = np.log(max(I0_est, epsilon))
         log_A_est = np.log(max(A_est, epsilon))
         log_width_est = np.log(max(width_est, epsilon))
