@@ -28,11 +28,7 @@ def timing_decorator(func):
 
 
 def process_pixel_row(args):
-    """
-    Function to process a single row of pixels.
-    Must be outside the class for multiprocessing.
-    """
-    m, data, freq_axis, default_values = args
+    m, data, freq_axis, default_values, method = args
     N = data.shape[1]
     row_results = {
         "I0": np.zeros(N),
@@ -43,7 +39,8 @@ def process_pixel_row(args):
     }
     
     for n in range(N):
-        result = ODMRAnalyzer.fit_single_pixel(data[m, n, :], freq_axis, default_values)
+        result = ODMRAnalyzer.fit_single_pixel(data[m, n, :], freq_axis, 
+                                             default_values, method)
         for key in row_results:
             row_results[key][n] = result[key]
     
@@ -116,7 +113,7 @@ class ODMRAnalyzer:
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
     @staticmethod
-    def fit_single_pixel(pixel_data, freq_axis, default_values=None):
+    def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
         Static method for fitting a single pixel.
         Takes explicit parameters instead of using class attributes.
@@ -160,17 +157,51 @@ class ODMRAnalyzer:
             f_center_est = np.mean([f_dip_1, f_dip_2])
             f_delta_est = abs(f_dip_2 - f_dip_1)
 
-        # Initial parameter bounds and guess
+        # Initial parameter guess stays the same as in your code
         p0 = [I0_est, A_est, width_est, f_center_est, f_delta_est]
-        bounds = ([
-            I0_est * 0.5, 0, 0.0001, freq_axis[0], 0
-        ], [
-            I0_est * 1.5, A_est * 2, np.ptp(freq_axis), freq_axis[-1], np.ptp(freq_axis)
-        ])
+
+        # Set up bounds differently based on optimization method
+        if method == 'lm':
+            # LM doesn't support bounds, so we'll use None
+            bounds = (-np.inf, np.inf)
+        else:
+            # Bounds for TRF method
+            bounds = ([
+                I0_est * 0.5, 0, 0.0001, freq_axis[0], 0
+            ], [
+                I0_est * 1.5, A_est * 2, np.ptp(freq_axis), freq_axis[-1], np.ptp(freq_axis)
+            ])
 
         try:
-            popt, _ = curve_fit(ODMRAnalyzer.double_dip_func, freq_axis, pixel_data, 
-                              p0=p0, bounds=bounds, method='trf')
+            if method == 'lm':
+                # For LM, we implement soft bounds through parameter transformation
+                def transformed_fit(f, *params):
+                    # Transform unbounded parameters to respect physical constraints
+                    I0 = params[0]  # Allow I0 to vary freely
+                    A = abs(params[1])  # Amplitude must be positive
+                    width = abs(params[2])  # Width must be positive
+                    f_center = freq_axis[0] + (freq_axis[-1] - freq_axis[0]) * \
+                            (0.5 + 0.5 * np.tanh(params[3]))  # Constrain to frequency range
+                    f_delta = abs(params[4])  # Splitting must be positive
+                    
+                    return ODMRAnalyzer.double_dip_func(f, I0, A, width, f_center, f_delta)
+                
+                popt, _ = curve_fit(transformed_fit, freq_axis, pixel_data, 
+                                p0=p0, method='lm')
+                
+                # Transform parameters back
+                popt = [
+                    popt[0],  # I0
+                    abs(popt[1]),  # A
+                    abs(popt[2]),  # width
+                    freq_axis[0] + (freq_axis[-1] - freq_axis[0]) * \
+                    (0.5 + 0.5 * np.tanh(popt[3])),  # f_center
+                    abs(popt[4])  # f_delta
+                ]
+            else:
+                # Use TRF with explicit bounds
+                popt, _ = curve_fit(ODMRAnalyzer.double_dip_func, freq_axis, pixel_data,
+                                p0=p0, bounds=bounds, method='trf')
             
             return {
                 "I0": popt[0],
@@ -212,9 +243,9 @@ class ODMRAnalyzer:
         print(f"Using {num_cores} CPU cores")
         
         # Create arguments for each row
-        row_args = [(m, self.data, self.freq_axis, default_values) 
+        row_args = [(m, self.data, self.freq_axis, default_values, method) 
                     for m in range(M)]
-        
+                
         # Process rows in parallel
         total_processed = 0
         start_time = time.time()
@@ -417,9 +448,14 @@ def main():
         choice = input("Enter your choice (1/2/3): ")
         
         if choice == '1':
-            # Perform full dataset fitting
-            fitted_params = analyzer.fit_double_lorentzian(output_dir="./fitted_parameters")
+            # Ask for optimization method
+            method_choice = input("Choose optimization method (trf/lm): ").lower()
+            while method_choice not in ['trf', 'lm']:
+                print("Invalid choice. Please choose 'trf' or 'lm'")
+                method_choice = input("Choose optimization method (trf/lm): ").lower()
             
+            # Perform full dataset fitting with chosen method
+            fitted_params = analyzer.fit_double_lorentzian(method=method_choice, output_dir="./fitted_parameters")
             # # Optional: Plot contrast map
             # fig_map, ax_map, contrast_map = analyzer.plot_contrast_map(fitted_params)
             # plt.show()
