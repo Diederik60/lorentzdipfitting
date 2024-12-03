@@ -115,7 +115,7 @@ class ODMRAnalyzer:
                 stats.print_stats()
                 print(s.getvalue())
 
-    # lorentzian double dip function without log scaling of I0 and A and width
+    # lorentzian double dip function without log scaling 
     @staticmethod
     def double_dip_func(f, I0, A, width, f_center, f_delta):
         """
@@ -126,31 +126,33 @@ class ODMRAnalyzer:
     
     # lorentzian double dip function with log scaling
     @staticmethod
-    def double_dip_func_log(f, log_I0, log_A, log_width, f_center, f_delta):
+    def double_dip_func_full_log(f, log_I0, log_A, log_width, log_f_center, log_f_delta):
         """
-        Double Lorentzian dip function with logarithmic parameters
-        Parameters are in log scale except for f_center and f_delta which can be negative
+        Double Lorentzian dip function with all parameters in logarithmic space
+        This reflects the physical reality that all parameters must be positive
         """
-        # Convert from log space
+        # Convert all parameters from log space
         I0 = np.exp(log_I0)
         A = np.exp(log_A)
         width = np.exp(log_width)
+        f_center = np.exp(log_f_center)
+        f_delta = np.exp(log_f_delta)
         
-        # Calculate double Lorentzian
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
+
         
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
-        Fit single pixel data using logarithmic scale optimization with curve_fit
+        Fit single pixel data using full logarithmic scale optimization
+        Now treating all parameters in log space to respect their physical positivity
         """
-        # Normalize data to improve numerical stability
+        # Normalize data for numerical stability
         scale_factor = np.max(np.abs(pixel_data))
         pixel_data_norm = pixel_data / scale_factor
         
-        # Add small offset to avoid log(0)
+        # Small constant to avoid log(0)
         epsilon = 1e-10
-        log_data = np.log(pixel_data_norm + epsilon)
         
         # Initial parameter estimation
         edge_points = np.concatenate([pixel_data_norm[:5], pixel_data_norm[-5:]])
@@ -158,11 +160,11 @@ class ODMRAnalyzer:
         A_est = np.ptp(pixel_data_norm) * 0.5
         freq_range = freq_axis[-1] - freq_axis[0]
         
-        # Find dips
+        # Find dips for initial estimates
         inverted = -pixel_data_norm
         peaks, _ = find_peaks(inverted, prominence=0.01)
         
-        # Initial parameter estimates
+        # Initial parameter estimates with physical consideration
         if len(peaks) == 0:
             width_est = freq_range * 0.1
             f_center_est = np.mean(freq_axis)
@@ -181,38 +183,40 @@ class ODMRAnalyzer:
             f_center_est = np.mean([f_dip_1, f_dip_2])
             f_delta_est = abs(f_dip_2 - f_dip_1)
         
-        # Convert to log space for parameters that must be positive
+        # Convert all initial estimates to log space
         log_I0_est = np.log(max(I0_est, epsilon))
         log_A_est = np.log(max(A_est, epsilon))
         log_width_est = np.log(max(width_est, epsilon))
+        log_f_center_est = np.log(max(f_center_est, epsilon))
+        log_f_delta_est = np.log(max(f_delta_est, epsilon))
         
-        # Initial parameter vector in mixed space (log space for positive parameters)
-        p0 = [log_I0_est, log_A_est, log_width_est, f_center_est, f_delta_est]
+        # Initial parameter vector (all in log space)
+        p0 = [log_I0_est, log_A_est, log_width_est, log_f_center_est, log_f_delta_est]
         
         # Set bounds for TRF method
         if method == 'trf':
-            # Bounds in log space for positive parameters
+            # All bounds in log space
             bounds = ([
                 np.log(epsilon),          # log_I0 lower
                 np.log(epsilon),          # log_A lower
                 np.log(freq_range*1e-4),  # log_width lower
-                freq_axis[0],             # f_center lower (linear space)
-                0                         # f_delta lower (linear space)
+                np.log(freq_axis[0]),     # log_f_center lower
+                np.log(epsilon)           # log_f_delta lower
             ], [
                 np.log(1e2),             # log_I0 upper
                 np.log(1e2),             # log_A upper
-                np.log(freq_range),       # log_width upper
-                freq_axis[-1],           # f_center upper (linear space)
-                freq_range               # f_delta upper (linear space)
+                np.log(freq_range),      # log_width upper
+                np.log(freq_axis[-1]),   # log_f_center upper
+                np.log(freq_range)       # log_f_delta upper
             ])
         else:
             bounds = (-np.inf, np.inf)
         
         try:
-            # Fit using curve_fit with logarithmic parameters
+            # Fit using curve_fit with all logarithmic parameters
             if method == 'trf':
                 popt, pcov = curve_fit(
-                    ODMRAnalyzer.double_dip_func_log,
+                    ODMRAnalyzer.double_dip_func_full_log,
                     freq_axis,
                     pixel_data_norm,
                     p0=p0,
@@ -224,7 +228,7 @@ class ODMRAnalyzer:
                 )
             else:
                 popt, pcov = curve_fit(
-                    ODMRAnalyzer.double_dip_func_log,
+                    ODMRAnalyzer.double_dip_func_full_log,
                     freq_axis,
                     pixel_data_norm,
                     p0=p0,
@@ -232,20 +236,21 @@ class ODMRAnalyzer:
                     maxfev=3000
                 )
             
-            # Convert optimized parameters back to linear space and original scale
+            # Convert all parameters back to linear space and original scale
             I0 = np.exp(popt[0]) * scale_factor
             A = np.exp(popt[1]) * scale_factor
             width = np.exp(popt[2])
-            f_center = popt[3]
-            f_delta = popt[4]
+            f_center = np.exp(popt[3])
+            f_delta = np.exp(popt[4])
             
-            # Calculate fit quality in log space
-            fitted_curve = ODMRAnalyzer.double_dip_func_log(freq_axis, *popt)
+            # Calculate fit quality
+            fitted_curve = ODMRAnalyzer.double_dip_func_full_log(freq_axis, *popt)
+            log_data = np.log(pixel_data_norm + epsilon)
             log_fitted = np.log(fitted_curve + epsilon)
             mse_log = np.mean((log_data - log_fitted)**2)
             
-            # If fit is poor, return default values
-            if mse_log > 1.0:  # Threshold can be adjusted
+            # Return default values if fit is poor
+            if mse_log > 1.0:
                 if default_values is None:
                     default_values = {
                         "I0": np.mean(pixel_data),
