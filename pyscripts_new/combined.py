@@ -47,18 +47,26 @@ def process_pixel_row(args):
     return m, row_results
 
 class ODMRAnalyzer:
-    def __init__(self, data_file, json_file, experiment_number):
+    def __init__(self, data_file, json_file, experiment_number, enable_profiling=False):
         """
         Initialize ODMR analyzer with data and parameters
         
         Args:
             data_file (str): Path to numpy data file
             json_file (str): Path to JSON parameter file
+            experiment_number (int): Experiment identifier
+            enable_profiling (bool): Whether to enable profiling functionality, turned off by default
         """
-
         #profiler for collectiong information about how much time is spent in every part of the code
-        self.profiler = cProfile.Profile()
-
+        # Add a flag to control profiling
+        self.profiling_enabled = enable_profiling
+        
+        # Only create profiler if enabled
+        if self.profiling_enabled:
+            self.profiler = cProfile.Profile()
+        else:
+            self.profiler = None     
+        
         self.experiment_number = experiment_number
 
         # loading data using the load_data method with timing decorator to inspect the time it takes 
@@ -93,16 +101,19 @@ class ODMRAnalyzer:
 
     #methods for profiling
     def start_profiling(self):
-        """Start profiling code execution"""
-        self.profiler.enable()
+        """Start profiling if enabled"""
+        if self.profiling_enabled and self.profiler:
+            self.profiler.enable()
 
-    def stop_profiling(self):
-        """Stop profiling and print results"""
-        self.profiler.disable()
-        s = io.StringIO()
-        stats = pstats.Stats(self.profiler, stream=s).sort_stats('cumulative')
-        stats.print_stats()
-        print(s.getvalue())
+    def stop_profiling(self, verbose=False):
+        """Stop profiling and optionally print results if enabled"""
+        if self.profiling_enabled and self.profiler:
+            self.profiler.disable()
+            if verbose:
+                s = io.StringIO()
+                stats = pstats.Stats(self.profiler, stream=s).sort_stats('cumulative')
+                stats.print_stats()
+                print(s.getvalue())
 
     @staticmethod
     def double_dip_func(f, I0, A, width, f_center, f_delta):
@@ -264,8 +275,10 @@ class ODMRAnalyzer:
                     pixels_per_second = total_processed / elapsed_time
                     remaining_pixels = (M * N) - total_processed
                     remaining_time = remaining_pixels / pixels_per_second
-                    print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
-                    print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
+                    
+                    # print statements for checking
+                    # print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
+                    # print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
         
         self.stop_profiling()
         
@@ -433,8 +446,8 @@ def main():
     json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.json'
     
     # Initialize analyzer
-    analyzer = ODMRAnalyzer(data_file, json_file, experiment_number)
-    
+    analyzer = ODMRAnalyzer(data_file, json_file, experiment_number, enable_profiling=False)
+
     # # Debug: Print detailed information about the data
     # print("Data shape:", analyzer.data.shape)
     # print("Data type:", type(analyzer.data))
