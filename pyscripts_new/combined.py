@@ -11,6 +11,8 @@ import cProfile
 import pstats
 from functools import wraps
 import io
+import multiprocessing as mp
+from functools import partial
 
 def timing_decorator(func):
     """Decorator to measure function execution time"""
@@ -23,6 +25,29 @@ def timing_decorator(func):
         print(f"{func.__name__} took {execution_time:.4f} seconds to execute")
         return result
     return wrapper
+
+
+def process_pixel_row(args):
+    """
+    Function to process a single row of pixels.
+    Must be outside the class for multiprocessing.
+    """
+    m, data, freq_axis, default_values = args
+    N = data.shape[1]
+    row_results = {
+        "I0": np.zeros(N),
+        "A": np.zeros(N),
+        "width": np.zeros(N),
+        "f_center": np.zeros(N),
+        "f_delta": np.zeros(N),
+    }
+    
+    for n in range(N):
+        result = ODMRAnalyzer.fit_single_pixel(data[m, n, :], freq_axis, default_values)
+        for key in row_results:
+            row_results[key][n] = result[key]
+    
+    return m, row_results
 
 class ODMRAnalyzer:
     def __init__(self, data_file, json_file, experiment_number):
@@ -82,78 +107,71 @@ class ODMRAnalyzer:
         stats.print_stats()
         print(s.getvalue())
 
-    def double_dip_func(self, f, I0, A, width, f_center, f_delta):
-        """Double Lorentzian dip function"""
+    @staticmethod
+    def double_dip_func(f, I0, A, width, f_center, f_delta):
+        """
+        Static method version of double Lorentzian dip function.
+        Must be static for multiprocessing to work.
+        """
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
-    def fit_single_pixel(self, pixel_intensity, tail=5, thresholds=[3, 5], 
-                     error_threshold=0.1, default_values=None, 
-                     method='trf'):
+    @staticmethod
+    def fit_single_pixel(pixel_data, freq_axis, default_values=None):
         """
-        Fits the double Lorentzian model to a single pixel.
-        
-        Args:
-            pixel_intensity (array): The intensity data for a single pixel.
-            tail (int): Number of data points at the start and end for noise estimation.
-            thresholds (list): Thresholds for peak detection.
-            error_threshold (float): Threshold for fit error handling.
-            default_values (dict): Default values for the fit parameters.
-            method (str): Method to use for curve fitting (e.g., 'trf').
-        
-        Returns:
-            dict: Fitted parameters for the pixel.
+        Static method for fitting a single pixel.
+        Takes explicit parameters instead of using class attributes.
         """
-        # Default parameter values
         if default_values is None:
-            default_values = {"I0": 1.0, "A": 0, "width": 1.0, 
-                            "f_center": np.mean(self.freq_axis), "f_delta": 0.0}
-        
-        # Estimate noise level and initial guesses
-        tail_values = np.concatenate((pixel_intensity[:tail], pixel_intensity[-tail:]))
+            default_values = {
+                "I0": 1.0, 
+                "A": 0, 
+                "width": 1.0, 
+                "f_center": np.mean(freq_axis), 
+                "f_delta": 0.0
+            }
+            
+        # Estimate noise level
+        tail = 5  # You can make this a parameter if needed
+        tail_values = np.concatenate((pixel_data[:tail], pixel_data[-tail:]))
         noise_std = np.std(tail_values)
         I0_est = np.average(tail_values)
-        A_est = np.max(pixel_intensity) - np.min(pixel_intensity) - 2 * noise_std
+        A_est = np.max(pixel_data) - np.min(pixel_data) - 2*noise_std
 
-        # Peak detection for initial parameter estimation
-        inverted = -pixel_intensity
+        # Peak detection
+        inverted = -pixel_data
         peaks, _ = find_peaks(inverted, prominence=0.01)
-        dips = [(p, p) for p in peaks]  # Simple dip representation
+        dips = [(p, p) for p in peaks]
 
         # Initial parameter estimation
         if len(dips) == 0:
             width_est = 1
-            f_center_est = np.average(self.freq_axis)
-            f_delta_est = (np.max(self.freq_axis) - np.min(self.freq_axis)) / 4
+            f_center_est = np.average(freq_axis)
+            f_delta_est = (np.max(freq_axis) - np.min(freq_axis)) / 4
         elif len(dips) == 1:
-            f_dip = self.freq_axis[dips[0][0]]
-            width_est = 0.001  # Small width
+            f_dip = freq_axis[dips[0][0]]
+            width_est = 0.001
             f_center_est = f_dip
-            f_delta_est = 0.003  # Assume nuclear splitting
+            f_delta_est = 0.003
             A_est *= 0.5
         else:
-            # Multiple dips: use first two for estimation
-            f_dip_1 = self.freq_axis[dips[0][0]]
-            f_dip_2 = self.freq_axis[dips[1][0]]
+            f_dip_1 = freq_axis[dips[0][0]]
+            f_dip_2 = freq_axis[dips[1][0]]
             width_est = abs(f_dip_2 - f_dip_1) / 2
             f_center_est = np.mean([f_dip_1, f_dip_2])
             f_delta_est = abs(f_dip_2 - f_dip_1)
 
-        # Initial parameter guess and bounds
+        # Initial parameter bounds and guess
         p0 = [I0_est, A_est, width_est, f_center_est, f_delta_est]
         bounds = ([
-            I0_est * 0.5, 0, 0.0001, self.freq_axis[0], 0
+            I0_est * 0.5, 0, 0.0001, freq_axis[0], 0
         ], [
-            I0_est * 1.5, A_est * 2, np.ptp(self.freq_axis), self.freq_axis[-1], np.ptp(self.freq_axis)
+            I0_est * 1.5, A_est * 2, np.ptp(freq_axis), freq_axis[-1], np.ptp(freq_axis)
         ])
 
         try:
-            # Curve fitting
-            popt, _ = curve_fit(self.double_dip_func, self.freq_axis, pixel_intensity, 
-                                p0=p0, 
-                                bounds=bounds, 
-                                method=method)
+            popt, _ = curve_fit(ODMRAnalyzer.double_dip_func, freq_axis, pixel_data, 
+                              p0=p0, bounds=bounds, method='trf')
             
-            # Return fitted parameters
             return {
                 "I0": popt[0],
                 "A": popt[1],
@@ -161,24 +179,17 @@ class ODMRAnalyzer:
                 "f_center": popt[3],
                 "f_delta": popt[4]
             }
-
         except RuntimeError:
-            # Return default values if fitting fails
             return default_values
-
 
     
     @timing_decorator  # Add this decorator to measure the overall function execution time
     def fit_double_lorentzian(self, tail=5, thresholds=[3, 5], 
-                            error_threshold=0.1, default_values=None, 
-                            method='trf', output_dir=None):
+                         error_threshold=0.1, default_values=None, 
+                         method='trf', output_dir=None):
         """
-        Fits the double Lorentzian model to the entire dataset with performance tracking
-        
-        Returns:
-            Dictionary of fitted parameters for each pixel
+        Parallel version of double Lorentzian fitting
         """
-        # Start the profiler to collect detailed performance data
         self.start_profiling()
         
         M, N, F = self.data.shape
@@ -194,38 +205,39 @@ class ODMRAnalyzer:
             default_values = {"I0": 1.0, "A": 0, "width": 1.0, 
                             "f_center": np.mean(self.freq_axis), "f_delta": 0.0}
 
-        # Add performance tracking variables
-        print(f"Processing {M*N} pixels...")
-        processed_pixels = 0
+        print(f"Processing {M*N} pixels using multiprocessing...")
+        
+        # Prepare the data for parallel processing
+        num_cores = mp.cpu_count()
+        print(f"Using {num_cores} CPU cores")
+        
+        # Create arguments for each row
+        row_args = [(m, self.data, self.freq_axis, default_values) 
+                    for m in range(M)]
+        
+        # Process rows in parallel
+        total_processed = 0
         start_time = time.time()
         
-        # Your existing loop with added performance reporting
-        for m in tqdm(range(M)):
-            for n in range(N):
-                # Get the intensity data for the current pixel
-                intens = self.data[m, n, :]
-                
-                # Use the single pixel fitting method instead of inline code
-                result = self.fit_single_pixel(intens)
-                
-                # Store the results
+        with mp.Pool(processes=num_cores) as pool:
+            for m, row_results in tqdm(pool.imap(process_pixel_row, row_args), 
+                                    total=M, 
+                                    desc="Processing rows"):
+                # Store results
                 for key in fitted_params:
-                    fitted_params[key][m, n] = result[key]
+                    fitted_params[key][m] = row_results[key]
                 
-                # Update performance tracking
-                processed_pixels += 1
-                if processed_pixels % 10 == 0:  # Report every 10 pixels
+                total_processed += N
+                if total_processed % (N * 2) == 0:  # Report every 2 rows
                     elapsed_time = time.time() - start_time
-                    pixels_per_second = processed_pixels / elapsed_time
-                    estimated_total_time = (M * N) / pixels_per_second
-                    remaining_time = estimated_total_time - elapsed_time
+                    pixels_per_second = total_processed / elapsed_time
+                    remaining_pixels = (M * N) - total_processed
+                    remaining_time = remaining_pixels / pixels_per_second
                     print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
                     print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
         
-        # Stop profiling and print results
         self.stop_profiling()
         
-        # Save parameters if output directory is specified
         if output_dir is not None:
             self.save_fitted_parameters(fitted_params, output_dir)
         
