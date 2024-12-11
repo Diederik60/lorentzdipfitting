@@ -18,13 +18,14 @@ import re
 
 
 def get_experiment_number(filename):
-        """Extract experiment number from filename."""
-        match = re.search(r'(\d+)\.npy$', filename)
-        return int(match.group(1)) if match else None
+    """Extract experiment number from filename with format '2D_ODMR_scan_{number}.npy'"""
+    pattern = r'2D_ODMR_scan_(\d+)\.npy$'
+    match = re.search(pattern, filename)
+    return int(match.group(1)) if match else None
 
 def process_directory(directory_path, method='trf', output_dir="./fitted_parameters"):
     """
-    Process all ODMR datasets in the specified directory.
+    Process ODMR datasets in the specified directory that match the pattern '2D_ODMR_scan_{number}'.
     
     Args:
         directory_path (str): Path to directory containing .npy and .json files
@@ -36,11 +37,11 @@ def process_directory(directory_path, method='trf', output_dir="./fitted_paramet
     output_path = Path(output_dir) / output_name
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Get all .npy files
-    npy_files = list(directory.glob('*ODMR_scan_*.npy'))
+    # Get only .npy files that match the specific pattern
+    npy_files = list(directory.glob('2D_ODMR_scan_*.npy'))
     total_files = len(npy_files)
     
-    print(f"Found {total_files} .npy files in {directory_path}")
+    print(f"Found {total_files} matching ODMR scan files in {directory_path}")
     
     for idx, npy_file in enumerate(npy_files, 1):
         experiment_number = get_experiment_number(str(npy_file))
@@ -688,10 +689,10 @@ class ODMRAnalyzer:
     
 
 def main():
-    experiment_number = 1730502804
+    experiment_number = 1730338486
 
-    data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.npy'
-    json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.json'
+    data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_2_biosample\2D_ODMR_scan_{experiment_number}.npy'
+    json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_2_biosample\2D_ODMR_scan_{experiment_number}.json'
     
     # Initialize analyzer
     analyzer = ODMRAnalyzer(data_file, json_file, experiment_number, enable_profiling=False)

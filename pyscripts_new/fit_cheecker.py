@@ -45,24 +45,28 @@ class ODMRFitChecker:
         self.fig, (self.ax_data, self.ax_map) = plt.subplots(1, 2, figsize=(15, 6))
         plt.subplots_adjust(bottom=0.25)  # Make room for sliders
         
-        # Initial pixel coordinates
+        # Initial pixel coordinates and view state
         self.x_idx, self.y_idx = 0, 0
+        self.full_range = True  # Track whether to show full range
         
         # Plot initial spectrum
         self.spectrum_line, = self.ax_data.plot(self.freq_axis, 
-                                              self.original_data[self.x_idx, self.y_idx], 
-                                              'b.', label='Data')
+                                            self.original_data[self.x_idx, self.y_idx], 
+                                            'b.', label='Data')
         
         # Calculate and plot initial fit
         params = self.fitted_params[self.x_idx, self.y_idx]
         fitted_curve = self.double_lorentzian(self.freq_axis, *params)
         self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', 
-                                          label='Fit')
+                                        label='Fit')
+        
+        # Set initial x-axis limits
+        self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
         
         # Create contrast map
         contrast_map = self.fitted_params[:, :, 1]  # Using amplitude (A) parameter
         self.map_img = self.ax_map.imshow(contrast_map.T, origin='lower', 
-                                         cmap='viridis')
+                                        cmap='viridis')
         self.pixel_marker, = self.ax_map.plot(self.x_idx, self.y_idx, 'rx')
         
         # Add colorbar
@@ -82,13 +86,24 @@ class ODMRFitChecker:
         self.x_slider = Slider(ax_x, 'X', 0, self.M-1, valinit=0, valstep=1)
         self.y_slider = Slider(ax_y, 'Y', 0, self.N-1, valinit=0, valstep=1)
         
+        # Add button for toggling x-axis range
+        ax_button = plt.axes([0.8, 0.15, 0.15, 0.04])
+        self.range_button = Button(ax_button, 'Toggle Range')
+        
+        def toggle_range(event):
+            self.full_range = not self.full_range
+            update(None)
+        
+        self.range_button.on_clicked(toggle_range)
+        
         # Add update function for sliders
         def update(val):
             self.x_idx = int(self.x_slider.val)
             self.y_idx = int(self.y_slider.val)
             
             # Update spectrum plot
-            self.spectrum_line.set_ydata(self.original_data[self.x_idx, self.y_idx])
+            y_data = self.original_data[self.x_idx, self.y_idx]
+            self.spectrum_line.set_ydata(y_data)
             
             # Update fit plot
             params = self.fitted_params[self.x_idx, self.y_idx]
@@ -105,11 +120,23 @@ class ODMRFitChecker:
                 f'fc={params[3]:.3f}, fd={params[4]:.3f}'
             )
             
-            # Rescale y-axis to fit data
-            y_data = self.original_data[self.x_idx, self.y_idx]
+            # Update axis limits based on view mode
             y_margin = (np.max(y_data) - np.min(y_data)) * 0.1
             self.ax_data.set_ylim(np.min(y_data) - y_margin, 
                                 np.max(y_data) + y_margin)
+            
+            if self.full_range:
+                # Show full frequency range
+                self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
+            else:
+                # Auto-scale x-axis around the dips
+                f_center = params[3]  # Center frequency
+                f_delta = params[4]   # Frequency splitting
+                width = params[2]     # Width
+                
+                # Set range to include both dips plus some margin
+                x_margin = max(width * 4, f_delta * 1.5)
+                self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
             
             self.fig.canvas.draw_idle()
         
@@ -124,10 +151,11 @@ class ODMRFitChecker:
 
 def main():
     # Replace these with your actual file paths
-    experiment_number = 1730664256
-    base_path = r'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample'
+    experiment_number = 1730338486
+    experiment_folder = 'oct-nov-2024 biosample'
+    base_path = fr"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\{experiment_folder}"
     
-    fitted_params_file = f"./fitted_parameters/lorentzian_params_{experiment_number}.npy"
+    fitted_params_file = f"./fitted_parameters/{experiment_folder}/lorentzian_params_{experiment_number}.npy"
     original_data_file = f"{base_path}/2D_ODMR_scan_{experiment_number}.npy"
     json_params_file = f"{base_path}/2D_ODMR_scan_{experiment_number}.json"
     
