@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks, savgol_filter
 from tqdm import tqdm
-import datetime
 import time
 import cProfile
 import pstats
@@ -25,59 +24,67 @@ def get_experiment_number(filename):
 
 def process_directory(directory_path, method='trf', output_dir="./fitted_parameters"):
     """
-    Process ODMR datasets in the specified directory that match the pattern '2D_ODMR_scan_{number}'.
+    Recursively process ODMR datasets in the specified directory and its subdirectories.
     
     Args:
         directory_path (str): Path to directory containing .npy and .json files
         method (str): Optimization method ('trf' or 'lm')
         output_dir (str): Directory to save fitted parameters
     """
-    output_name = Path(directory_path).name
     directory = Path(directory_path)
-    output_path = Path(output_dir) / output_name
-    output_path.mkdir(parents=True, exist_ok=True)
     
-    # Get only .npy files that match the specific pattern
+    # Process all subdirectories first
+    subdirs = [d for d in directory.iterdir() if d.is_dir()]
+    if subdirs:
+        print(f"\nFound {len(subdirs)} subdirectories in {directory_path}")
+        for subdir in subdirs:
+            print(f"\nProcessing subdirectory: {subdir.name}")
+            # Create corresponding output subdirectory
+            subdir_output = Path(output_dir) / subdir.name
+            process_directory(subdir, method=method, output_dir=str(subdir_output))
+    
+    # Then process any ODMR files in the current directory
     npy_files = list(directory.glob('2D_ODMR_scan_*.npy'))
     total_files = len(npy_files)
     
-    print(f"Found {total_files} matching ODMR scan files in {directory_path}")
-    
-    for idx, npy_file in enumerate(npy_files, 1):
-        experiment_number = get_experiment_number(str(npy_file))
-        if not experiment_number:
-            print(f"Could not extract experiment number from {npy_file}")
-            continue
-            
-        json_file = directory / f'2D_ODMR_scan_{experiment_number}.json'
+    if total_files > 0:
+        print(f"\nFound {total_files} matching ODMR scan files in {directory_path}")
         
-        if not json_file.exists():
-            print(f"No matching JSON file found for {npy_file}")
-            continue
+        # Create output directory for current directory
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         
-        print(f"\nProcessing file {idx}/{total_files}: {npy_file.name}")
-        print(f"Processing experiment {experiment_number}")
-        
-        try:
-            # Initialize analyzer for this dataset
-            analyzer = ODMRAnalyzer(str(npy_file), str(json_file), experiment_number)
+        for idx, npy_file in enumerate(npy_files, 1):
+            experiment_number = get_experiment_number(str(npy_file))
+            if not experiment_number:
+                print(f"Could not extract experiment number from {npy_file}")
+                continue
+                
+            json_file = directory / f'2D_ODMR_scan_{experiment_number}.json'
             
-            # Create experiment-specific output directory
-            exp_output_dir = output_path 
-            exp_output_dir.mkdir(exist_ok=True)
+            if not json_file.exists():
+                print(f"No matching JSON file found for {npy_file}")
+                continue
             
-            # Fit the data
-            fitted_params = analyzer.fit_double_lorentzian(
-                method=method,
-                output_dir=str(exp_output_dir)
-            )
+            print(f"\nProcessing file {idx}/{total_files}: {npy_file.name}")
+            print(f"Processing experiment {experiment_number}")
             
-            print(f"Successfully processed experiment {experiment_number}")
-            
-        except Exception as e:
-            print(f"Error processing experiment {experiment_number}: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            try:
+                # Initialize analyzer for this dataset
+                analyzer = ODMRAnalyzer(str(npy_file), str(json_file), experiment_number)
+                
+                # Fit the data
+                fitted_params = analyzer.fit_double_lorentzian(
+                    method=method,
+                    output_dir=str(output_path)
+                )
+                
+                print(f"Successfully processed experiment {experiment_number}")
+                
+            except Exception as e:
+                print(f"Error processing experiment {experiment_number}: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
 def timing_decorator(func):
     """Decorator to measure function execution time"""
