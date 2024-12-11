@@ -124,7 +124,7 @@ class ODMRFitChecker:
 
 def main():
     # Replace these with your actual file paths
-    experiment_number = 1730558912
+    experiment_number = 1730664256
     base_path = r'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample'
     
     fitted_params_file = f"./fitted_parameters/lorentzian_params_{experiment_number}.npy"

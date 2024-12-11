@@ -13,6 +13,70 @@ from functools import wraps
 import io
 import multiprocessing as mp
 from functools import partial
+from pathlib import Path
+import re
+
+
+def get_experiment_number(filename):
+        """Extract experiment number from filename."""
+        match = re.search(r'(\d+)\.npy$', filename)
+        return int(match.group(1)) if match else None
+
+def process_directory(directory_path, method='trf', output_dir="./fitted_parameters"):
+    """
+    Process all ODMR datasets in the specified directory.
+    
+    Args:
+        directory_path (str): Path to directory containing .npy and .json files
+        method (str): Optimization method ('trf' or 'lm')
+        output_dir (str): Directory to save fitted parameters
+    """
+    output_name = Path(directory_path).name
+    directory = Path(directory_path)
+    output_path = Path(output_dir) / output_name
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Get all .npy files
+    npy_files = list(directory.glob('*ODMR_scan_*.npy'))
+    total_files = len(npy_files)
+    
+    print(f"Found {total_files} .npy files in {directory_path}")
+    
+    for idx, npy_file in enumerate(npy_files, 1):
+        experiment_number = get_experiment_number(str(npy_file))
+        if not experiment_number:
+            print(f"Could not extract experiment number from {npy_file}")
+            continue
+            
+        json_file = directory / f'2D_ODMR_scan_{experiment_number}.json'
+        
+        if not json_file.exists():
+            print(f"No matching JSON file found for {npy_file}")
+            continue
+        
+        print(f"\nProcessing file {idx}/{total_files}: {npy_file.name}")
+        print(f"Processing experiment {experiment_number}")
+        
+        try:
+            # Initialize analyzer for this dataset
+            analyzer = ODMRAnalyzer(str(npy_file), str(json_file), experiment_number)
+            
+            # Create experiment-specific output directory
+            exp_output_dir = output_path 
+            exp_output_dir.mkdir(exist_ok=True)
+            
+            # Fit the data
+            fitted_params = analyzer.fit_double_lorentzian(
+                method=method,
+                output_dir=str(exp_output_dir)
+            )
+            
+            print(f"Successfully processed experiment {experiment_number}")
+            
+        except Exception as e:
+            print(f"Error processing experiment {experiment_number}: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def timing_decorator(func):
     """Decorator to measure function execution time"""
@@ -460,8 +524,8 @@ class ODMRAnalyzer:
                     remaining_time = remaining_pixels / pixels_per_second
                     
                     # print statements for checking
-                    # print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
-                    # print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
+                    print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
+                    print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
         
         self.stop_profiling()
         
@@ -621,9 +685,10 @@ class ODMRAnalyzer:
             'num_dips': len(peaks),
             'fitted_parameters': fitted_analysis
         }
+    
 
 def main():
-    experiment_number = 1730558912
+    experiment_number = 1730502804
 
     data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.npy'
     json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.json'
@@ -642,9 +707,10 @@ def main():
         print("\nODMR Analysis Options:")
         print("1. Perform full dataset fitting and save parameters")
         print("2. Analyze single pixel spectrum")
-        print("3. Exit")
+        print("3. Batch process directory")
+        print("4. Exit")
         
-        choice = input("Enter your choice (1/2/3): ")
+        choice = input("Enter your choice (1/2/3/4): ")
         
         if choice == '1':
             # Ask for optimization method
@@ -721,6 +787,25 @@ def main():
                 print("Please enter valid integer coordinates.")
         
         elif choice == '3':
+            # Batch processing
+            directory = input("Enter directory path containing ODMR datasets: ")
+            method_choice = input("Choose optimization method (trf/lm): ").lower()
+            while method_choice not in ['trf', 'lm']:
+                print("Invalid choice. Please choose 'trf' or 'lm'")
+                method_choice = input("Choose optimization method (trf/lm): ").lower()
+            
+            output_dir = input("Enter output directory path (press Enter for default './fitted_parameters'): ")
+            if not output_dir:
+                output_dir = "./fitted_parameters"
+            
+            try:
+                process_directory(directory, method=method_choice, output_dir=output_dir)
+            except Exception as e:
+                print(f"Error during batch processing: {e}")
+                import traceback
+                traceback.print_exc()
+
+        elif choice == '4':
             break
         
         else:
