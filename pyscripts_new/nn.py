@@ -1,8 +1,8 @@
 import tensorflow as tf
-
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logging
 tf.get_logger().setLevel('ERROR')
 import logging
-
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 import numpy as np
 import pandas as pd
@@ -11,6 +11,9 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import argparse
 import wandb
+
+print(f"wandb version: {wandb.__version__}")
+print(f"tensorflow version: {tf.__version__}")
 
 
 class TrainingConfig:
@@ -248,9 +251,10 @@ def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=Fa
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=15,
+            patience=5,
             restore_best_weights=True,
-            verbose=0
+            verbose=1,
+            min_delta=1e-4
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_loss',
@@ -268,15 +272,25 @@ def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=Fa
     ]
 
     if use_wandb:
-        callbacks.append(
-            wandb.keras.callbacks.WandbCallback(
+        try:
+            # Try the new import path first
+            from wandb.keras import WandbCallback
+            wandb_callback = WandbCallback(
                 monitor='val_loss',
                 save_model=False,
                 log_weights=False
             )
-        )
+        except ImportError:
+            # Fall back to alternative import path
+            import wandb.keras
+            wandb_callback = wandb.keras.WandbCallback(
+                monitor='val_loss',
+                save_model=False,
+                log_weights=False
+            )
+        callbacks.append(wandb_callback)
 
-    print("\nTraining Progress:", flush=True)
+    print("\nTraining Progress:")
     histories = []
     for stage in range(3):
         print(f"\nStage {stage + 1}/3:")
@@ -287,9 +301,9 @@ def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=Fa
             epochs=epochs,
             batch_size=config.batch_size if config else 128,
             callbacks=callbacks,
-            verbose=1  # Changed from 0 to 1 to show progress bar
+            verbose=1
         )
-        histories.append(history)
+        histories.append(history)  # Save each history
 
         val_loss = history.history['val_loss'][-1]
         print(f"Stage {stage + 1} completed - Final val_loss: {val_loss:.4f}")
@@ -301,44 +315,50 @@ def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=Fa
     return model, histories
 
 
-def evaluate_predictions(model, X_test, y_test, processor):
+def evaluate_predictions(model, X_test, y_test, processor, show_plot=True):
     y_pred = np.column_stack(model.predict(X_test, verbose=0))
     y_test_orig = processor.inverse_transform_outputs(y_test)
     y_pred_orig = processor.inverse_transform_outputs(y_pred)
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
-
     metrics = {}
     for i, param in enumerate(processor.param_columns):
-        axes[i].scatter(y_test_orig[:, i], y_pred_orig[:, i], alpha=0.5)
-
-        min_val = min(y_test_orig[:, i].min(), y_pred_orig[:, i].min())
-        max_val = max(y_test_orig[:, i].max(), y_pred_orig[:, i].max())
-        axes[i].plot([min_val, max_val], [min_val, max_val], 'r--')
-
         mse = np.mean((y_test_orig[:, i] - y_pred_orig[:, i]) ** 2)
         r2 = np.corrcoef(y_test_orig[:, i], y_pred_orig[:, i])[0, 1] ** 2
-
         metrics[f'{param}_mse'] = mse
         metrics[f'{param}_r2'] = r2
 
-        axes[i].set_title(f'{param} Predictions')
-        axes[i].set_xlabel('True Values')
-        axes[i].set_ylabel('Predicted Values')
-        axes[i].text(0.05, 0.95, f'MSE: {mse:.2e}\nR²: {r2:.3f}',
-                     transform=axes[i].transAxes,
-                     verticalalignment='top')
+    if show_plot:
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        axes = axes.flatten()
 
-    plt.tight_layout()
-    plt.show()
+        for i, param in enumerate(processor.param_columns):
+            axes[i].scatter(y_test_orig[:, i], y_pred_orig[:, i], alpha=0.5)
+
+            min_val = min(y_test_orig[:, i].min(), y_pred_orig[:, i].min())
+            max_val = max(y_test_orig[:, i].max(), y_pred_orig[:, i].max())
+            axes[i].plot([min_val, max_val], [min_val, max_val], 'r--')
+
+            axes[i].set_title(f'{param} Predictions')
+            axes[i].set_xlabel('True Values')
+            axes[i].set_ylabel('Predicted Values')
+            axes[i].text(0.05, 0.95, f'MSE: {mse:.2e}\nR²: {r2:.3f}',
+                        transform=axes[i].transAxes,
+                        verticalalignment='top')
+
+        plt.tight_layout()
+        plt.show()
 
     return y_pred_orig, metrics
 
 
 def train_model_wandb(config=None):
-    with wandb.init(config=config):
+    with wandb.init(config=config) as run:
         config = wandb.config
+
+        # Print current configuration
+        print("\nCurrent sweep configuration:")
+        for key, value in config.items():
+            print(f"{key}: {value}")
 
         df = pd.read_csv('test.csv')
         processor = ODMRDataProcessor()
@@ -351,35 +371,71 @@ def train_model_wandb(config=None):
             X_train, y_train, test_size=0.2, random_state=42
         )
 
+        # Create TrainingConfig object from wandb config
+        training_config = TrainingConfig(
+            initial_units=config.initial_units,
+            second_units=config.second_units,
+            dropout_rate=config.dropout_rate,
+            learning_rate=config.learning_rate,
+            batch_size=config.batch_size,
+            epochs=config.epochs,
+            I0_loss_weight=config.I0_loss_weight,
+            A_loss_weight=config.A_loss_weight,
+            width_loss_weight=config.width_loss_weight,
+            f_center_loss_weight=config.f_center_loss_weight,
+            f_delta_loss_weight=config.f_delta_loss_weight
+        )
+
         model, histories = train_improved_model(
             X_train, y_train, X_val, y_val,
             epochs=config.epochs,
             use_wandb=True,
-            config=config
+            config=training_config
         )
 
-        _, metrics = evaluate_predictions(model, X_test, y_test, processor)
+        # Evaluate and log metrics
+        _, metrics = evaluate_predictions(model, X_test, y_test, processor, show_plot=False)
         wandb.log(metrics)
 
 
 sweep_config = {
-    'method': 'bayes',
+    'method': 'bayes',  # Using Bayesian optimization for parameter search
     'metric': {
         'name': 'val_loss',
         'goal': 'minimize'
     },
     'parameters': {
-        'initial_units': {'values': [512, 1024, 2048]},
-        'second_units': {'values': [256, 512, 1024]},
-        'dropout_rate': {'values': [0.1, 0.2, 0.3]},
-        'learning_rate': {'values': [1e-3, 3e-4, 1e-4]},
-        'batch_size': {'values': [64, 128, 256]},
-        'epochs': {'value': 20},
-        'I0_loss_weight': {'values': [0.5, 1.0, 2.0]},
-        'A_loss_weight': {'values': [0.5, 1.0, 2.0]},
-        'width_loss_weight': {'values': [1.0, 2.0, 4.0]},
-        'f_center_loss_weight': {'values': [1.0, 2.0, 4.0]},
-        'f_delta_loss_weight': {'values': [1.0, 2.0, 4.0]}
+        'initial_units': {
+            'values': [512, 1024, 2048]
+        },
+        'second_units': {
+            'values': [256, 512, 1024]
+        },
+        'dropout_rate': {
+            'values': [0.1, 0.2, 0.3]
+        },
+        'learning_rate': {
+            'values': [1e-3, 3e-4, 1e-4]
+        },
+        'batch_size': {
+            'values': [64, 128, 256]
+        },
+        'epochs': {'value': 15},  # Fixed value for all runs
+        'I0_loss_weight': {
+            'values': [0.5, 1.0, 2.0]
+        },
+        'A_loss_weight': {
+            'values': [0.5, 1.0, 2.0]
+        },
+        'width_loss_weight': {
+            'values': [1.0, 2.0, 4.0]
+        },
+        'f_center_loss_weight': {
+            'values': [1.0, 2.0, 4.0]
+        },
+        'f_delta_loss_weight': {
+            'values': [1.0, 2.0, 4.0]
+        }
     }
 }
 
@@ -396,13 +452,15 @@ def regular_training(config):
         X_train, y_train, test_size=0.2, random_state=42
     )
 
-    # Pass config.epochs instead of the entire config object
+    # Get both model and histories from train_improved_model
     model, histories = train_improved_model(
         X_train, y_train, X_val, y_val,
-        epochs=config.epochs,  # Changed from epochs=epochs
-        config=config  # Add this to pass the full config
+        epochs=config.epochs,
+        config=config
     )
-    y_pred, _ = evaluate_predictions(model, X_test, y_test, processor)
+
+    # Pass histories to evaluate_predictions
+    y_pred, _ = evaluate_predictions(model, X_test, y_test, processor, show_plot=True)
 
     return model, processor, y_pred
 
@@ -415,18 +473,15 @@ def main():
     args = parser.parse_args()
 
     if args.mode == 'wandb':
-        # WandB sweep configuration remains unchanged
         wandb.login()
-        sweep_id = wandb.sweep(sweep_config, project="odmr-fitting",
-                               entity="diederikdekker-tu-delft")
-        wandb.agent(sweep_id, train_model_wandb, count=20)
+        sweep_id = wandb.sweep(sweep_config, project="odmr-fitting")
+
+        # Specify number of runs to try different configurations
+        wandb.agent(sweep_id, train_model_wandb, count=5)  # Will run 20 different configurations
         return None, None, None
     else:
-        # Choose your configuration here
-        # config = get_training_config('default')
-        config = get_training_config('focus_on_width_and_frequency')
-        # config = get_training_config('quick_test')
-        print(config)  # Print the configuration before training
+        config = get_training_config('default')
+        print(config)
         return regular_training(config)
 
 
