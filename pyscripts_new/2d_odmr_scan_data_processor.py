@@ -696,10 +696,10 @@ class ODMRAnalyzer:
     
 
 def main():
-    experiment_number = 1730338486
+    experiment_number = 1730558912
 
-    data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_2_biosample\2D_ODMR_scan_{experiment_number}.npy'
-    json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_2_biosample\2D_ODMR_scan_{experiment_number}.json'
+    data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.npy'
+    json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.json'
     
     # Initialize analyzer
     analyzer = ODMRAnalyzer(data_file, json_file, experiment_number, enable_profiling=False)

@@ -151,7 +151,7 @@ class ODMRFitChecker:
 
 def main():
     # Replace these with your actual file paths
-    experiment_number = 1730338486
+    experiment_number = 1730558912
     experiment_folder = 'oct-nov-2024 biosample'
     base_path = fr"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\{experiment_folder}"
     
