@@ -1,8 +1,10 @@
 import tensorflow as tf
 import os
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logging
 tf.get_logger().setLevel('ERROR')
 import logging
+
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 import numpy as np
 import pandas as pd
@@ -93,19 +95,18 @@ def get_training_config(config_name='default'):
             f_delta_loss_weight=1.0
         ),
 
-        'focus_on_width_and_frequency': TrainingConfig(
-            # Configuration that emphasizes width and frequency predictions
+        'focus_on_frequency': TrainingConfig(
             initial_units=2048,
             second_units=1024,
-            dropout_rate=0.3,
-            learning_rate=3e-4,
-            batch_size=256,
-            epochs=10,
-            I0_loss_weight=0.5,
-            A_loss_weight=0.5,
-            width_loss_weight=2.0,
-            f_center_loss_weight=2.0,
-            f_delta_loss_weight=2.0
+            dropout_rate=0.1,
+            learning_rate=1e-5,  # Even slower learning
+            batch_size=32,  # Smaller batches
+            epochs=100,  # More epochs
+            I0_loss_weight=1.0,
+            A_loss_weight=1.0,
+            width_loss_weight=10.0,
+            f_center_loss_weight=10.0,
+            f_delta_loss_weight=10.0
         ),
 
         'quick_test': TrainingConfig(
@@ -180,21 +181,88 @@ def parameter_specific_losses(config=None):
 
 
 def create_tuned_model(input_dim=100, config=None):
+    inputs = tf.keras.Input(shape=(input_dim,))
+
+    # Initial feature extraction
+    x = tf.keras.layers.Dense(2048, activation='relu')(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dense(1024, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+
+    # Split into two paths: intensity and frequency
+    intensity_path = tf.keras.layers.Dense(512, activation='relu')(x)
+    frequency_path = tf.keras.layers.Dense(1024, activation='relu')(x)
+
+    # Intensity branches (I0, A)
+    i0_branch = tf.keras.layers.Dense(256)(intensity_path)
+    a_branch = tf.keras.layers.Dense(256)(intensity_path)
+
+    # Frequency branches with deeper networks
+    freq_layers = [1024, 512, 256, 128]
+    width_branch = frequency_path
+    f_center_branch = frequency_path
+    f_delta_branch = frequency_path
+
+    for units in freq_layers:
+        width_branch = tf.keras.layers.Dense(units, activation='relu')(width_branch)
+        f_center_branch = tf.keras.layers.Dense(units, activation='relu')(f_center_branch)
+        f_delta_branch = tf.keras.layers.Dense(units, activation='relu')(f_delta_branch)
+
+    outputs = [
+        tf.keras.layers.Dense(1, name='I0')(i0_branch),
+        tf.keras.layers.Dense(1, name='A')(a_branch),
+        tf.keras.layers.Dense(1, name='width')(width_branch),
+        tf.keras.layers.Dense(1, name='f_center')(f_center_branch),
+        tf.keras.layers.Dense(1, name='f_delta')(f_delta_branch)
+    ]
+
+    return tf.keras.Model(inputs=inputs, outputs=outputs)
+    inputs = tf.keras.Input(shape=(input_dim,))
+
+    # Shared feature extraction
+    x = tf.keras.layers.Dense(2048, activation='relu')(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dense(1024, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+
+    # Specialized branches
+    param_branches = {
+        'I0': [512, 256],  # Simple branch - already performs well
+        'A': [512, 256],  # Simple branch - performs adequately
+        'width': [1024, 512, 256, 128],  # Complex features
+        'f_center': [1024, 512, 256, 128],  # Frequency-related
+        'f_delta': [1024, 512, 256, 128]  # Frequency-related
+    }
+
+    outputs = []
+    for param, layers in param_branches.items():
+        branch = x
+        for units in layers:
+            branch = tf.keras.layers.Dense(units, activation='relu')(branch)
+            branch = tf.keras.layers.BatchNormalization()(branch)
+        output = tf.keras.layers.Dense(1, name=param)(branch)
+        outputs.append(output)
+
+    return tf.keras.Model(inputs=inputs, outputs=outputs)
     if config is None:
         class DefaultConfig:
             def __init__(self):
-                self.initial_units = 1024
-                self.second_units = 512
+                self.initial_units = 2048
+                self.second_units = 1024
                 self.dropout_rate = 0.2
 
         config = DefaultConfig()
 
     inputs = tf.keras.Input(shape=(input_dim,))
 
+    # Increase depth of shared layers
     x = tf.keras.layers.Dense(config.initial_units, activation='relu')(inputs)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Dropout(config.dropout_rate)(x)
+    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
+    x = tf.keras.layers.BatchNormalization()(x)
 
+    # First residual block
     skip1 = x
     x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
@@ -202,6 +270,7 @@ def create_tuned_model(input_dim=100, config=None):
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Add()([x, skip1])
 
+    # Second residual block
     skip2 = x
     x = tf.keras.layers.Dense(config.second_units, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
@@ -211,11 +280,11 @@ def create_tuned_model(input_dim=100, config=None):
 
     outputs = []
     param_branches = {
-        'I0': [256],
-        'A': [256],
-        'width': [512, 256],
-        'f_center': [512, 256, 128],
-        'f_delta': [512, 256, 128]
+        'I0': [512, 256, 128],
+        'A': [512, 256, 128],
+        'width': [1024, 512, 256, 128],
+        'f_center': [1024, 512, 256, 128, 64],
+        'f_delta': [1024, 512, 256, 128, 64]
     }
 
     for param, layers in param_branches.items():
@@ -223,6 +292,7 @@ def create_tuned_model(input_dim=100, config=None):
         for units in layers:
             branch = tf.keras.layers.Dense(units, activation='relu')(branch)
             branch = tf.keras.layers.BatchNormalization()(branch)
+            branch = tf.keras.layers.Dropout(config.dropout_rate)(branch)
         output = tf.keras.layers.Dense(1, name=param)(branch)
         outputs.append(output)
 
@@ -315,38 +385,59 @@ def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=Fa
     return model, histories
 
 
-def evaluate_predictions(model, X_test, y_test, processor, show_plot=True):
+def evaluate_predictions(model, X_test, y_test, processor, histories=None, show_plot=True):
     y_pred = np.column_stack(model.predict(X_test, verbose=0))
     y_test_orig = processor.inverse_transform_outputs(y_test)
     y_pred_orig = processor.inverse_transform_outputs(y_pred)
-
-    metrics = {}
-    for i, param in enumerate(processor.param_columns):
-        mse = np.mean((y_test_orig[:, i] - y_pred_orig[:, i]) ** 2)
-        r2 = np.corrcoef(y_test_orig[:, i], y_pred_orig[:, i])[0, 1] ** 2
-        metrics[f'{param}_mse'] = mse
-        metrics[f'{param}_r2'] = r2
 
     if show_plot:
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         axes = axes.flatten()
 
+        # Plot parameter predictions (first 5 subplots)
         for i, param in enumerate(processor.param_columns):
             axes[i].scatter(y_test_orig[:, i], y_pred_orig[:, i], alpha=0.5)
-
             min_val = min(y_test_orig[:, i].min(), y_pred_orig[:, i].min())
             max_val = max(y_test_orig[:, i].max(), y_pred_orig[:, i].max())
             axes[i].plot([min_val, max_val], [min_val, max_val], 'r--')
+
+            mse = np.mean((y_test_orig[:, i] - y_pred_orig[:, i]) ** 2)
+            r2 = np.corrcoef(y_test_orig[:, i], y_pred_orig[:, i])[0, 1] ** 2
 
             axes[i].set_title(f'{param} Predictions')
             axes[i].set_xlabel('True Values')
             axes[i].set_ylabel('Predicted Values')
             axes[i].text(0.05, 0.95, f'MSE: {mse:.2e}\nR²: {r2:.3f}',
-                        transform=axes[i].transAxes,
-                        verticalalignment='top')
+                         transform=axes[i].transAxes,
+                         verticalalignment='top')
+
+        # Plot loss history in the sixth subplot
+        if histories:
+            train_losses = []
+            val_losses = []
+            for history in histories:
+                train_losses.extend(history.history['loss'])
+                val_losses.extend(history.history['val_loss'])
+
+            epochs = range(1, len(train_losses) + 1)
+            axes[5].plot(epochs, train_losses, 'b-', label='Training Loss')
+            axes[5].plot(epochs, val_losses, 'r-', label='Validation Loss')
+            axes[5].set_title('Model Loss')
+            axes[5].set_xlabel('Epoch')
+            axes[5].set_ylabel('Loss')
+            axes[5].legend()
+            axes[5].grid(True)
+
+            # Add vertical lines to separate stages
+            stage_length = len(histories[0].history['loss'])
+            for stage in range(1, 3):
+                axes[5].axvline(x=stage * stage_length, color='gray', linestyle='--', alpha=0.5)
 
         plt.tight_layout()
         plt.show()
+
+    metrics = {f'{param}_mse': np.mean((y_test_orig[:, i] - y_pred_orig[:, i]) ** 2)
+               for i, param in enumerate(processor.param_columns)}
 
     return y_pred_orig, metrics
 
@@ -452,16 +543,13 @@ def regular_training(config):
         X_train, y_train, test_size=0.2, random_state=42
     )
 
-    # Get both model and histories from train_improved_model
     model, histories = train_improved_model(
         X_train, y_train, X_val, y_val,
         epochs=config.epochs,
         config=config
     )
 
-    # Pass histories to evaluate_predictions
-    y_pred, _ = evaluate_predictions(model, X_test, y_test, processor, show_plot=True)
-
+    y_pred, _ = evaluate_predictions(model, X_test, y_test, processor, histories=histories, show_plot=True)
     return model, processor, y_pred
 
 
@@ -480,7 +568,7 @@ def main():
         wandb.agent(sweep_id, train_model_wandb, count=5)  # Will run 20 different configurations
         return None, None, None
     else:
-        config = get_training_config('default')
+        config = get_training_config('focus_on_width_and_frequency')
         print(config)
         return regular_training(config)
 
