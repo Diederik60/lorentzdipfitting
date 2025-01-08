@@ -24,13 +24,13 @@ class TrainingConfig:
                  second_units=512,
                  dropout_rate=0.2,
                  learning_rate=1e-3,
-                 batch_size=128,
-                 epochs=20,
+                 batch_size=32,  # Changed to smaller batch size
+                 epochs=50,      # Increased epochs
                  I0_loss_weight=1.0,
                  A_loss_weight=1.0,
-                 width_loss_weight=1.0,
-                 f_center_loss_weight=1.0,
-                 f_delta_loss_weight=1.0):
+                 width_loss_weight=5.0,  # Increased importance
+                 f_center_loss_weight=5.0,  # Increased importance
+                 f_delta_loss_weight=5.0):  # Increased importance
         # Network architecture
         self.initial_units = initial_units
         self.second_units = second_units
@@ -95,18 +95,18 @@ def get_training_config(config_name='default'):
             f_delta_loss_weight=1.0
         ),
 
-        'focus_on_frequency': TrainingConfig(
+        'better': TrainingConfig(
             initial_units=2048,
             second_units=1024,
             dropout_rate=0.1,
-            learning_rate=1e-5,  # Even slower learning
-            batch_size=32,  # Smaller batches
-            epochs=100,  # More epochs
+            learning_rate=1e-4,  # Reduced learning rate
+            batch_size=32,       # Smaller batches
+            epochs=25,          # More epochs
             I0_loss_weight=1.0,
             A_loss_weight=1.0,
-            width_loss_weight=10.0,
-            f_center_loss_weight=10.0,
-            f_delta_loss_weight=10.0
+            width_loss_weight=5.0,
+            f_center_loss_weight=5.0,
+            f_delta_loss_weight=5.0
         ),
 
         'quick_test': TrainingConfig(
@@ -156,147 +156,123 @@ class ODMRDataProcessor:
 
 
 def parameter_specific_losses(config=None):
+    """
+    Create physically meaningful loss functions for each parameter.
+    Each loss function incorporates domain knowledge about acceptable ranges and relationships.
+    """
     def get_weight(param):
         if config is None:
             return 1.0
         return getattr(config, f'{param.lower()}_loss_weight', 1.0)
 
-    def combined_loss(param):
-        weight = get_weight(param)
+    def baseline_loss(y_true, y_pred):
+        weight = get_weight('I0')
+        # Basic error terms
+        mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
+        relative_error = tf.abs((y_true - y_pred) / (y_true + 1e-7))
+        return weight * (mse + 0.1 * relative_error)
 
-        def loss(y_true, y_pred):
-            mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
-            relative_error = tf.abs((y_true - y_pred) / (y_true + 1e-7))
-            return weight * (mse + 0.1 * relative_error)
+    def amplitude_loss(y_true, y_pred):
+        weight = get_weight('A')
+        # Basic error terms
+        mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
+        relative_error = tf.abs((y_true - y_pred) / (y_true + 1e-7))
+        return weight * (mse + 0.1 * relative_error)
 
-        return loss
+    def width_loss(y_true, y_pred):
+        weight = get_weight('width')
+        # Scale sigmoid output to physical range (0-0.02)
+        y_pred_scaled = 0.02 * y_pred
+        mse = tf.keras.losses.mean_squared_error(y_true, y_pred_scaled)
+        relative_error = tf.abs((y_true - y_pred_scaled) / (y_true + 1e-7))
+        return weight * (mse + relative_error)
+
+    def f_center_loss(y_true, y_pred):
+        weight = get_weight('f_center')
+        # Direct MSE for frequency prediction
+        return weight * tf.keras.losses.mean_squared_error(y_true, y_pred)
+
+    def f_delta_loss(y_true, y_pred):
+        weight = get_weight('f_delta')
+        # Scale sigmoid output to physical range (0-0.1)
+        y_pred_scaled = 0.1 * y_pred
+        mse = tf.keras.losses.mean_squared_error(y_true, y_pred_scaled)
+        relative_error = tf.abs((y_true - y_pred_scaled) / (y_true + 1e-7))
+        return weight * (mse + relative_error)
 
     return {
-        'I0': combined_loss('I0'),
-        'A': combined_loss('A'),
-        'width': combined_loss('width'),
-        'f_center': combined_loss('f_center'),
-        'f_delta': combined_loss('f_delta')
+        'I0': baseline_loss,
+        'A': amplitude_loss,
+        'width': width_loss,
+        'f_center': f_center_loss,
+        'f_delta': f_delta_loss
     }
-
 
 def create_tuned_model(input_dim=100, config=None):
-    inputs = tf.keras.Input(shape=(input_dim,))
-
-    # Initial feature extraction
-    x = tf.keras.layers.Dense(2048, activation='relu')(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(1024, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-
-    # Split into two paths: intensity and frequency
-    intensity_path = tf.keras.layers.Dense(512, activation='relu')(x)
-    frequency_path = tf.keras.layers.Dense(1024, activation='relu')(x)
-
-    # Intensity branches (I0, A)
-    i0_branch = tf.keras.layers.Dense(256)(intensity_path)
-    a_branch = tf.keras.layers.Dense(256)(intensity_path)
-
-    # Frequency branches with deeper networks
-    freq_layers = [1024, 512, 256, 128]
-    width_branch = frequency_path
-    f_center_branch = frequency_path
-    f_delta_branch = frequency_path
-
-    for units in freq_layers:
-        width_branch = tf.keras.layers.Dense(units, activation='relu')(width_branch)
-        f_center_branch = tf.keras.layers.Dense(units, activation='relu')(f_center_branch)
-        f_delta_branch = tf.keras.layers.Dense(units, activation='relu')(f_delta_branch)
-
-    outputs = [
-        tf.keras.layers.Dense(1, name='I0')(i0_branch),
-        tf.keras.layers.Dense(1, name='A')(a_branch),
-        tf.keras.layers.Dense(1, name='width')(width_branch),
-        tf.keras.layers.Dense(1, name='f_center')(f_center_branch),
-        tf.keras.layers.Dense(1, name='f_delta')(f_delta_branch)
-    ]
-
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
-    inputs = tf.keras.Input(shape=(input_dim,))
-
-    # Shared feature extraction
-    x = tf.keras.layers.Dense(2048, activation='relu')(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(1024, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-
-    # Specialized branches
-    param_branches = {
-        'I0': [512, 256],  # Simple branch - already performs well
-        'A': [512, 256],  # Simple branch - performs adequately
-        'width': [1024, 512, 256, 128],  # Complex features
-        'f_center': [1024, 512, 256, 128],  # Frequency-related
-        'f_delta': [1024, 512, 256, 128]  # Frequency-related
-    }
-
-    outputs = []
-    for param, layers in param_branches.items():
-        branch = x
-        for units in layers:
-            branch = tf.keras.layers.Dense(units, activation='relu')(branch)
-            branch = tf.keras.layers.BatchNormalization()(branch)
-        output = tf.keras.layers.Dense(1, name=param)(branch)
-        outputs.append(output)
-
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
+    """
+    Create a sequential model for ODMR spectrum analysis.
+    This architecture focuses on thorough feature extraction before parameter prediction.
+    """
     if config is None:
-        class DefaultConfig:
-            def __init__(self):
-                self.initial_units = 2048
-                self.second_units = 1024
-                self.dropout_rate = 0.2
-
-        config = DefaultConfig()
-
+        config = TrainingConfig()
+        
     inputs = tf.keras.Input(shape=(input_dim,))
-
-    # Increase depth of shared layers
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(inputs)
+    
+    # 1. Initial spectrum encoding
+    # Reshape for convolution operations
+    x = tf.keras.layers.Reshape((input_dim, 1))(inputs)
+    
+    # Multi-scale feature extraction using various kernel sizes
+    # This helps capture both local dip features and global baseline trends
+    conv_3 = tf.keras.layers.Conv1D(64, kernel_size=3, padding='same', activation='relu')(x)
+    conv_5 = tf.keras.layers.Conv1D(64, kernel_size=5, padding='same', activation='relu')(x)
+    conv_7 = tf.keras.layers.Conv1D(64, kernel_size=7, padding='same', activation='relu')(x)
+    
+    # Combine all scales
+    x = tf.keras.layers.Concatenate()([conv_3, conv_5, conv_7])
+    
+    # 2. Deep feature processing
+    # Extract local features that are relevant for dip characteristics
+    x = tf.keras.layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(config.dropout_rate)(x)
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
+    x = tf.keras.layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-
-    # First residual block
-    skip1 = x
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
+    
+    # Global context
+    x_global = tf.keras.layers.GlobalAveragePooling1D()(x)
+    x_max = tf.keras.layers.GlobalMaxPooling1D()(x)
+    x = tf.keras.layers.Concatenate()([x_global, x_max])
+    
+    # 3. Dense feature processing
+    # These layers learn the relationships between different parameters
+    x = tf.keras.layers.Dense(512, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    
+    x = tf.keras.layers.Dense(256, activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Add()([x, skip1])
+    x = tf.keras.layers.Dropout(0.2)(x)
+    
+    # 4. Parameter prediction
+    # Each parameter gets its own final layer with appropriate activation
+    i0_output = tf.keras.layers.Dense(1, activation='softplus', name='I0')(x)
+    
+    a_output = tf.keras.layers.Dense(1, activation='softplus', name='A')(x)
+    
+    # Width needs to be small but positive
+    width_output = tf.keras.layers.Dense(1, activation='sigmoid', name='width')(x)
+    
+    # Center frequency should be in measurement range
+    f_center_output = tf.keras.layers.Dense(1, name='f_center')(x)
+    
+    # Frequency separation should be positive
+    f_delta_output = tf.keras.layers.Dense(1, activation='sigmoid', name='f_delta')(x)
+    
+    return tf.keras.Model(
+        inputs=inputs,
+        outputs=[i0_output, a_output, width_output, f_center_output, f_delta_output]
+    )
 
-    # Second residual block
-    skip2 = x
-    x = tf.keras.layers.Dense(config.second_units, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(config.second_units, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Add()([x, tf.keras.layers.Dense(config.second_units)(skip2)])
-
-    outputs = []
-    param_branches = {
-        'I0': [512, 256, 128],
-        'A': [512, 256, 128],
-        'width': [1024, 512, 256, 128],
-        'f_center': [1024, 512, 256, 128, 64],
-        'f_delta': [1024, 512, 256, 128, 64]
-    }
-
-    for param, layers in param_branches.items():
-        branch = x
-        for units in layers:
-            branch = tf.keras.layers.Dense(units, activation='relu')(branch)
-            branch = tf.keras.layers.BatchNormalization()(branch)
-            branch = tf.keras.layers.Dropout(config.dropout_rate)(branch)
-        output = tf.keras.layers.Dense(1, name=param)(branch)
-        outputs.append(output)
-
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
 
 
 def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=False, config=None):
@@ -568,7 +544,7 @@ def main():
         wandb.agent(sweep_id, train_model_wandb, count=5)  # Will run 20 different configurations
         return None, None, None
     else:
-        config = get_training_config('focus_on_width_and_frequency')
+        config = get_training_config('better')
         print(config)
         return regular_training(config)
 
