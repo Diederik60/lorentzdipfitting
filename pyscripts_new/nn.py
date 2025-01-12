@@ -101,7 +101,7 @@ def get_training_config(config_name='default'):
             dropout_rate=0.1,
             learning_rate=1e-5,  # Even slower learning
             batch_size=32,  # Smaller batches
-            epochs=100,  # More epochs
+            epochs=25,  # More epochs
             I0_loss_weight=1.0,
             A_loss_weight=1.0,
             width_loss_weight=10.0,
@@ -141,9 +141,16 @@ class ODMRDataProcessor:
         X_scaled = self.input_scaler.fit_transform(X)
         y_processed = np.zeros_like(y)
         for i, param in enumerate(self.param_columns):
-            y_processed[:, i] = self.scalers[param].fit_transform(
-                np.log1p(y[:, i].reshape(-1, 1))
-            ).ravel()
+            if param in ['width', 'f_delta']:
+                # Don't log transform width and f_delta
+                y_processed[:, i] = self.scalers[param].fit_transform(
+                    y[:, i].reshape(-1, 1)
+                ).ravel()
+            else:
+                # Log transform other parameters
+                y_processed[:, i] = self.scalers[param].fit_transform(
+                    np.log1p(y[:, i].reshape(-1, 1))
+                ).ravel()
         return X_scaled, y_processed
 
     def inverse_transform_outputs(self, y_scaled):
@@ -156,174 +163,158 @@ class ODMRDataProcessor:
 
 
 def parameter_specific_losses(config=None):
+    """
+    Creates improved loss functions for each parameter with appropriate weighting and constraints.
+    """
     def get_weight(param):
         if config is None:
             return 1.0
         return getattr(config, f'{param.lower()}_loss_weight', 1.0)
-
-    def combined_loss(param):
+    
+    def custom_loss(param):
         weight = get_weight(param)
-
+        
         def loss(y_true, y_pred):
+            # Base MSE loss
             mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
-            relative_error = tf.abs((y_true - y_pred) / (y_true + 1e-7))
+            
+            # Relative error with safe denominator
+            relative_error = tf.abs(y_true - y_pred) / (tf.abs(y_true) + 1e-7)
+            
+            # Parameter-specific additional terms
+            if param in ['width', 'f_delta']:
+                # Ensure positive values and reasonable ranges
+                positivity_penalty = tf.reduce_mean(tf.maximum(0.0, -y_pred))
+                range_penalty = tf.reduce_mean(tf.maximum(0.0, y_pred - 1.0))
+                
+                return weight * (mse + 0.1 * relative_error + positivity_penalty + range_penalty)
+            
+            elif param in ['I0', 'A']:
+                # Ensure positive values for intensity parameters
+                positivity_penalty = tf.reduce_mean(tf.maximum(0.0, -y_pred))
+                return weight * (mse + 0.1 * relative_error + positivity_penalty)
+            
+            # Default case (f_center)
             return weight * (mse + 0.1 * relative_error)
-
+        
         return loss
-
+    
     return {
-        'I0': combined_loss('I0'),
-        'A': combined_loss('A'),
-        'width': combined_loss('width'),
-        'f_center': combined_loss('f_center'),
-        'f_delta': combined_loss('f_delta')
+        'I0': custom_loss('I0'),
+        'A': custom_loss('A'),
+        'width': custom_loss('width'),
+        'f_center': custom_loss('f_center'),
+        'f_delta': custom_loss('f_delta')
     }
 
-
-def create_tuned_model(input_dim=100, config=None):
-    inputs = tf.keras.Input(shape=(input_dim,))
-
-    # Initial feature extraction
-    x = tf.keras.layers.Dense(2048, activation='relu')(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(1024, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-
-    # Split into two paths: intensity and frequency
-    intensity_path = tf.keras.layers.Dense(512, activation='relu')(x)
-    frequency_path = tf.keras.layers.Dense(1024, activation='relu')(x)
-
-    # Intensity branches (I0, A)
-    i0_branch = tf.keras.layers.Dense(256)(intensity_path)
-    a_branch = tf.keras.layers.Dense(256)(intensity_path)
-
-    # Frequency branches with deeper networks
-    freq_layers = [1024, 512, 256, 128]
-    width_branch = frequency_path
-    f_center_branch = frequency_path
-    f_delta_branch = frequency_path
-
-    for units in freq_layers:
-        width_branch = tf.keras.layers.Dense(units, activation='relu')(width_branch)
-        f_center_branch = tf.keras.layers.Dense(units, activation='relu')(f_center_branch)
-        f_delta_branch = tf.keras.layers.Dense(units, activation='relu')(f_delta_branch)
-
-    outputs = [
-        tf.keras.layers.Dense(1, name='I0')(i0_branch),
-        tf.keras.layers.Dense(1, name='A')(a_branch),
-        tf.keras.layers.Dense(1, name='width')(width_branch),
-        tf.keras.layers.Dense(1, name='f_center')(f_center_branch),
-        tf.keras.layers.Dense(1, name='f_delta')(f_delta_branch)
-    ]
-
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
-    inputs = tf.keras.Input(shape=(input_dim,))
-
-    # Shared feature extraction
-    x = tf.keras.layers.Dense(2048, activation='relu')(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(1024, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-
-    # Specialized branches
-    param_branches = {
-        'I0': [512, 256],  # Simple branch - already performs well
-        'A': [512, 256],  # Simple branch - performs adequately
-        'width': [1024, 512, 256, 128],  # Complex features
-        'f_center': [1024, 512, 256, 128],  # Frequency-related
-        'f_delta': [1024, 512, 256, 128]  # Frequency-related
-    }
-
-    outputs = []
-    for param, layers in param_branches.items():
-        branch = x
-        for units in layers:
-            branch = tf.keras.layers.Dense(units, activation='relu')(branch)
-            branch = tf.keras.layers.BatchNormalization()(branch)
-        output = tf.keras.layers.Dense(1, name=param)(branch)
-        outputs.append(output)
-
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
+def create_improved_model(input_dim=100, config=None):
+    """
+    Creates an improved ODMR model with multi-scale convolutions and separate branches.
+    """
     if config is None:
-        class DefaultConfig:
-            def __init__(self):
-                self.initial_units = 2048
-                self.second_units = 1024
-                self.dropout_rate = 0.2
-
-        config = DefaultConfig()
-
+        config = TrainingConfig()
+        
     inputs = tf.keras.Input(shape=(input_dim,))
-
-    # Increase depth of shared layers
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(inputs)
+    
+    # 1. Initial spectrum encoding with multi-scale convolutions
+    x = tf.keras.layers.Reshape((input_dim, 1))(inputs)
+    
+    # Multi-scale feature extraction
+    conv_3 = tf.keras.layers.Conv1D(64, kernel_size=3, padding='same', activation='relu')(x)
+    conv_5 = tf.keras.layers.Conv1D(64, kernel_size=5, padding='same', activation='relu')(x)
+    conv_7 = tf.keras.layers.Conv1D(64, kernel_size=7, padding='same', activation='relu')(x)
+    
+    # Combine features
+    x = tf.keras.layers.Concatenate()([conv_3, conv_5, conv_7])
+    
+    # Additional feature processing
+    x = tf.keras.layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(config.dropout_rate)(x)
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
+    x = tf.keras.layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(x)
     x = tf.keras.layers.BatchNormalization()(x)
+    
+    # Global features
+    x_avg = tf.keras.layers.GlobalAveragePooling1D()(x)
+    x_max = tf.keras.layers.GlobalMaxPooling1D()(x)
+    x = tf.keras.layers.Concatenate()([x_avg, x_max])
+    
+    # 2. Separate processing branches
+    # Frequency branch (more complex features)
+    frequency_branch = tf.keras.layers.Dense(1024, activation='relu')(x)
+    frequency_branch = tf.keras.layers.BatchNormalization()(frequency_branch)
+    frequency_branch = tf.keras.layers.Dropout(0.2)(frequency_branch)
+    frequency_branch = tf.keras.layers.Dense(512, activation='relu')(frequency_branch)
+    frequency_branch = tf.keras.layers.BatchNormalization()(frequency_branch)
+    frequency_branch = tf.keras.layers.Dense(256, activation='relu')(frequency_branch)
+    frequency_branch = tf.keras.layers.BatchNormalization()(frequency_branch)
+    
+    # Intensity branch (simpler features)
+    intensity_branch = tf.keras.layers.Dense(256, activation='relu')(x)
+    intensity_branch = tf.keras.layers.BatchNormalization()(intensity_branch)
+    intensity_branch = tf.keras.layers.Dense(128, activation='relu')(intensity_branch)
+    intensity_branch = tf.keras.layers.BatchNormalization()(intensity_branch)
+    
+    # 3. Output layers with appropriate constraints
+    # Intensity outputs
+    i0_output = tf.keras.layers.Dense(1, activation='softplus', name='I0')(intensity_branch)
+    a_output = tf.keras.layers.Dense(1, activation='softplus', name='A')(intensity_branch)
+    
+    # Frequency outputs
+    # Width needs to be small but positive
+    width_output = tf.keras.layers.Dense(1, activation='sigmoid', name='width')(frequency_branch)
+    
+    # Center frequency should be in measurement range
+    f_center_output = tf.keras.layers.Dense(1, name='f_center')(frequency_branch)
+    
+    # Frequency separation should be positive
+    f_delta_output = tf.keras.layers.Dense(1, activation='sigmoid', name='f_delta')(frequency_branch)
+    
+    model = tf.keras.Model(
+        inputs=inputs,
+        outputs=[i0_output, a_output, width_output, f_center_output, f_delta_output]
+    )
+    
+    return model
 
-    # First residual block
-    skip1 = x
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(config.initial_units, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Add()([x, skip1])
 
-    # Second residual block
-    skip2 = x
-    x = tf.keras.layers.Dense(config.second_units, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dense(config.second_units, activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Add()([x, tf.keras.layers.Dense(config.second_units)(skip2)])
-
-    outputs = []
-    param_branches = {
-        'I0': [512, 256, 128],
-        'A': [512, 256, 128],
-        'width': [1024, 512, 256, 128],
-        'f_center': [1024, 512, 256, 128, 64],
-        'f_delta': [1024, 512, 256, 128, 64]
-    }
-
-    for param, layers in param_branches.items():
-        branch = x
-        for units in layers:
-            branch = tf.keras.layers.Dense(units, activation='relu')(branch)
-            branch = tf.keras.layers.BatchNormalization()(branch)
-            branch = tf.keras.layers.Dropout(config.dropout_rate)(branch)
-        output = tf.keras.layers.Dense(1, name=param)(branch)
-        outputs.append(output)
-
-    return tf.keras.Model(inputs=inputs, outputs=outputs)
-
-
-def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=False, config=None):
-    model = create_tuned_model(config=config)
-
-    trainable_params = np.sum([np.prod(v.get_shape()) for v in model.trainable_weights])
-    non_trainable_params = np.sum([np.prod(v.get_shape()) for v in model.non_trainable_weights])
-    print(f"\nTotal parameters: {trainable_params + non_trainable_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Non-trainable parameters: {non_trainable_params:,}")
-
-    losses = parameter_specific_losses(config)
+def train_improved_model(X_train, y_train, X_val, y_val, config=None, epochs=None, use_wandb=False):
+    """
+    Improved training function with better learning rate scheduling and monitoring.
+    """
+    model = create_improved_model(X_train.shape[1], config)
+    
+    # Print model summary
+    print("\nModel Architecture:")
+    print("-" * 50)
+    model.summary(expand_nested=True, show_trainable=True, line_length=80)
+    
+    # Setup training parameters
     learning_rate = config.learning_rate if config else 1e-3
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-
+    batch_size = config.batch_size if config else 128
+    epochs = epochs or (config.epochs if config else 20)
+    
+    # Use parameter specific losses
+    losses = parameter_specific_losses(config)  # Changed from improved_loss_functions
+    
+    # Setup optimizer with gradient clipping
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=learning_rate,
+        clipnorm=1.0  # Add gradient clipping
+    )
+    
+    # Compile model
     model.compile(
         optimizer=optimizer,
         loss=losses,
         metrics=['mae']
     )
-
+    
+    # Setup callbacks
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=5,
+            patience=10,
             restore_best_weights=True,
-            verbose=1,
             min_delta=1e-4
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
@@ -331,58 +322,35 @@ def train_improved_model(X_train, y_train, X_val, y_val, epochs=20, use_wandb=Fa
             factor=0.5,
             patience=5,
             min_lr=1e-6,
-            verbose=0
+            verbose=1
         ),
         tf.keras.callbacks.ModelCheckpoint(
             'best_model.h5',
             monitor='val_loss',
-            save_best_weights=True,
-            verbose=0
-        )
-    ]
-
-    if use_wandb:
-        try:
-            # Try the new import path first
-            from wandb.keras import WandbCallback
-            wandb_callback = WandbCallback(
-                monitor='val_loss',
-                save_model=False,
-                log_weights=False
-            )
-        except ImportError:
-            # Fall back to alternative import path
-            import wandb.keras
-            wandb_callback = wandb.keras.WandbCallback(
-                monitor='val_loss',
-                save_model=False,
-                log_weights=False
-            )
-        callbacks.append(wandb_callback)
-
-    print("\nTraining Progress:")
-    histories = []
-    for stage in range(3):
-        print(f"\nStage {stage + 1}/3:")
-        history = model.fit(
-            X_train,
-            [y_train[:, i] for i in range(5)],
-            validation_data=(X_val, [y_val[:, i] for i in range(5)]),
-            epochs=epochs,
-            batch_size=config.batch_size if config else 128,
-            callbacks=callbacks,
+            save_best_only=True,
             verbose=1
         )
-        histories.append(history)  # Save each history
-
-        val_loss = history.history['val_loss'][-1]
-        print(f"Stage {stage + 1} completed - Final val_loss: {val_loss:.4f}")
-
-        current_lr = float(optimizer.learning_rate)
-        optimizer.learning_rate = current_lr * 0.1
-        print(f"Learning rate reduced to: {current_lr * 0.1:.2e}")
-
-    return model, histories
+    ]
+    
+    if use_wandb:
+        try:
+            from wandb.keras import WandbCallback
+            callbacks.append(WandbCallback(monitor='val_loss'))
+        except ImportError:
+            print("Warning: wandb not available")
+    
+    # Train model
+    history = model.fit(
+        X_train,
+        [y_train[:, i] for i in range(5)],
+        validation_data=(X_val, [y_val[:, i] for i in range(5)]),
+        epochs=epochs,
+        batch_size=batch_size,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    return model, [history]  # Wrap the history in a list
 
 
 def evaluate_predictions(model, X_test, y_test, processor, histories=None, show_plot=True):
@@ -479,11 +447,9 @@ def train_model_wandb(config=None):
 
         model, histories = train_improved_model(
             X_train, y_train, X_val, y_val,
-            epochs=config.epochs,
-            use_wandb=True,
-            config=training_config
+            config=training_config,
+            use_wandb=True
         )
-
         # Evaluate and log metrics
         _, metrics = evaluate_predictions(model, X_test, y_test, processor, show_plot=False)
         wandb.log(metrics)
@@ -568,7 +534,7 @@ def main():
         wandb.agent(sweep_id, train_model_wandb, count=5)  # Will run 20 different configurations
         return None, None, None
     else:
-        config = get_training_config('focus_on_width_and_frequency')
+        config = get_training_config('focus_on_frequency')
         print(config)
         return regular_training(config)
 
