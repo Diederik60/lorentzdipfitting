@@ -14,7 +14,7 @@ import multiprocessing as mp
 from functools import partial
 from pathlib import Path
 import re
-from matplotlib.widgets import Slider, Button
+from matplotlib.widgets import Slider, Button, RadioButtons
 
 
 def organize_experiment_files(experiment_number, original_data_file, original_json_file, fitted_params_file, base_output_dir):
@@ -144,11 +144,6 @@ class ODMRFitChecker:
     def __init__(self, fitted_params_file, original_data_file, json_params_file):
         """
         Initialize the ODMR fit checker with data files
-        
-        Args:
-            fitted_params_file (str): Path to .npy file with fitted parameters
-            original_data_file (str): Path to original ODMR scan data
-            json_params_file (str): Path to JSON file with frequency parameters
         """
         # Load the fitted parameters (shape: M x N x 5)
         self.fitted_params = np.load(fitted_params_file)
@@ -170,46 +165,58 @@ class ODMRFitChecker:
         # Get data dimensions
         self.M, self.N = self.fitted_params.shape[:2]
         
+        # Define parameter names and their indices
+        self.param_info = {
+            'Baseline (I0)': {'index': 0, 'cmap': 'viridis'},
+            'Amplitude (A)': {'index': 1, 'cmap': 'viridis'},
+            'Width': {'index': 2, 'cmap': 'plasma'},
+            'Center Frequency': {'index': 3, 'cmap': 'magma'},
+            'Frequency Splitting': {'index': 4, 'cmap': 'inferno'}
+        }
+        
     def double_lorentzian(self, f, I0, A, width, f_center, f_delta):
-        """
-        Calculate double Lorentzian function with given parameters.
-        This matches the fitting function used in the analyzer.
-        """
+        """Calculate double Lorentzian function with given parameters."""
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - \
                A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
     def create_interactive_viewer(self):
-        """Create an interactive plot to browse through pixels"""
+        """Create an interactive plot with parameter selection"""
         # Set up the figure and subplots
-        self.fig, (self.ax_data, self.ax_map) = plt.subplots(1, 2, figsize=(15, 6))
-        plt.subplots_adjust(bottom=0.25)  # Make room for sliders
+        self.fig = plt.figure(figsize=(15, 8))
+        gs = self.fig.add_gridspec(1, 2, width_ratios=[1, 1])
+        self.ax_data = self.fig.add_subplot(gs[0])
+        self.ax_map = self.fig.add_subplot(gs[1])
+        plt.subplots_adjust(bottom=0.25, left=0.1)  # Make room for controls
         
-        # Initial pixel coordinates and view state
+        # Initial state
         self.x_idx, self.y_idx = 0, 0
-        self.full_range = True  # Track whether to show full range
+        self.full_range = True
+        self.current_param = 'Amplitude (A)'  # Default parameter to display
         
         # Plot initial spectrum
         self.spectrum_line, = self.ax_data.plot(self.freq_axis, 
-                                            self.original_data[self.x_idx, self.y_idx], 
-                                            'b.', label='Data')
+                                              self.original_data[self.x_idx, self.y_idx], 
+                                              'b.', label='Data')
         
         # Calculate and plot initial fit
         params = self.fitted_params[self.x_idx, self.y_idx]
         fitted_curve = self.double_lorentzian(self.freq_axis, *params)
         self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', 
-                                        label='Fit')
+                                          label='Fit')
         
         # Set initial x-axis limits
         self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
         
-        # Create contrast map using the amplitude parameter
-        contrast_map = self.fitted_params[:, :, 1]  # Using amplitude (A) parameter
-        self.map_img = self.ax_map.imshow(contrast_map.T, origin='lower', 
-                                        cmap='viridis')
+        # Create initial parameter map
+        param_idx = self.param_info[self.current_param]['index']
+        param_map = self.fitted_params[:, :, param_idx]
+        self.map_img = self.ax_map.imshow(param_map.T, origin='lower', 
+                                         cmap=self.param_info[self.current_param]['cmap'])
         self.pixel_marker, = self.ax_map.plot(self.x_idx, self.y_idx, 'rx')
         
         # Add colorbar
-        plt.colorbar(self.map_img, ax=self.ax_map, label='Contrast (A)')
+        self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
+        self.colorbar.set_label(self.current_param)
         
         # Set up axis labels
         self.ax_data.set_xlabel('Frequency (GHz)')
@@ -229,14 +236,32 @@ class ODMRFitChecker:
         ax_button = plt.axes([0.8, 0.15, 0.15, 0.04])
         self.range_button = Button(ax_button, 'Toggle Range')
         
-        # Define toggle range function
+        # Add radio buttons for parameter selection
+        ax_radio = plt.axes([0.02, 0.3, 0.12, 0.3])
+        self.param_radio = RadioButtons(ax_radio, list(self.param_info.keys()), 
+                                      active=list(self.param_info.keys()).index(self.current_param))
+        
+        # Define update functions
+        def update_param(label):
+            self.current_param = label
+            param_idx = self.param_info[label]['index']
+            param_map = self.fitted_params[:, :, param_idx]
+            
+            # Update colormap
+            self.map_img.set_data(param_map.T)
+            self.map_img.set_cmap(self.param_info[label]['cmap'])
+            
+            # Update colorbar label
+            self.colorbar.set_label(label)
+            
+            # Update colorbar limits
+            self.map_img.autoscale()
+            self.fig.canvas.draw_idle()
+        
         def toggle_range(event):
             self.full_range = not self.full_range
             update(None)
         
-        self.range_button.on_clicked(toggle_range)
-        
-        # Define update function for sliders
         def update(val):
             self.x_idx = int(self.x_slider.val)
             self.y_idx = int(self.y_slider.val)
@@ -254,33 +279,30 @@ class ODMRFitChecker:
             self.pixel_marker.set_data([self.x_idx], [self.y_idx])
             
             # Update title with fit parameters
-            self.ax_data.set_title(
-                f'Pixel ({self.x_idx}, {self.y_idx})\n' + 
-                f'I0={params[0]:.3f}, A={params[1]:.3f}, w={params[2]:.3f}, ' + 
-                f'fc={params[3]:.3f}, fd={params[4]:.3f}'
-            )
+            param_names = ['I0', 'A', 'w', 'fc', 'fd']
+            param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
+            self.ax_data.set_title(f'Pixel ({self.x_idx}, {self.y_idx})\n{param_str}')
             
-            # Update axis limits based on view mode
+            # Update y-axis limits
             y_margin = (np.max(y_data) - np.min(y_data)) * 0.1
             self.ax_data.set_ylim(np.min(y_data) - y_margin, 
                                 np.max(y_data) + y_margin)
             
+            # Update x-axis limits based on view mode
             if self.full_range:
-                # Show full frequency range
                 self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
             else:
-                # Auto-scale x-axis around the dips
-                f_center = params[3]  # Center frequency
-                f_delta = params[4]   # Frequency splitting
-                width = params[2]     # Width
-                
-                # Set range to include both dips plus some margin
+                f_center = params[3]
+                f_delta = params[4]
+                width = params[2]
                 x_margin = max(width * 4, f_delta * 1.5)
                 self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
             
             self.fig.canvas.draw_idle()
         
-        # Connect sliders to update function
+        # Connect callbacks
+        self.param_radio.on_clicked(update_param)
+        self.range_button.on_clicked(toggle_range)
         self.x_slider.on_changed(update)
         self.y_slider.on_changed(update)
         
@@ -914,10 +936,14 @@ class ODMRAnalyzer:
     
 
 def main():
-
     data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024 bonded sample\2D_ODMR_scan_1731601991.npy"
     json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024 bonded sample\2D_ODMR_scan_1731601991.json"
 
+    # Initialize analyzer at the start
+    analyzer = None
+    if os.path.exists(data_file) and os.path.exists(json_file):
+        analyzer = ODMRAnalyzer(data_file, json_file, enable_profiling=False)
+    
     while True:
         print("\nODMR Analysis Options:")
         print("1. Perform experiment fitting and save parameters")
@@ -928,11 +954,14 @@ def main():
         
         choice = input("Enter your choice (1/2/3/4/5): ")
         
-        if choice == '1':
+        # Check if analyzer is needed and not initialized
+        if choice in ['1', '2'] and analyzer is None:
             if not all(os.path.exists(f) for f in [data_file, json_file]):
                 print("Error: One or more input files not found.")
                 continue
-                
+            analyzer = ODMRAnalyzer(data_file, json_file, enable_profiling=False)
+
+        if choice == '1':
             method_choice = input("Choose optimization method (trf/lm): ").lower()
             while method_choice not in ['trf', 'lm']:
                 print("Invalid choice. Please choose 'trf' or 'lm'")
@@ -942,8 +971,6 @@ def main():
             if not output_dir:
                 output_dir = "./fitted_parameters"
             
-            # Initialize analyzer and process data
-            analyzer = ODMRAnalyzer(data_file, json_file, enable_profiling=False)
             output_dir, fitted_params_file = analyzer.fit_double_lorentzian(
                 method=method_choice,
                 output_dir=output_dir
@@ -976,24 +1003,18 @@ def main():
                     # Plot the pixel spectrum with fitted curve
                     fig_spectrum, ax_spectrum = analyzer.plot_pixel_spectrum(
                         x, y, 
-                        fit_result={
-                            'I0': single_pixel_params['I0'],
-                            'A': single_pixel_params['A'],
-                            'width': single_pixel_params['width'],
-                            'f_center': single_pixel_params['f_center'],
-                            'f_delta': single_pixel_params['f_delta']
-                        }
+                        fit_result=single_pixel_params
                     )
                     plt.show()
 
                     # Analyze and display results
                     analysis = analyzer.analyze_spectrum(x, y, 
                         fitted_params={
-                            'I0': single_pixel_params['I0'],
-                            'A': single_pixel_params['A'],
-                            'width': single_pixel_params['width'],
-                            'f_center': single_pixel_params['f_center'],
-                            'f_delta': single_pixel_params['f_delta']
+                            'I0': np.array([[single_pixel_params['I0']]]),
+                            'A': np.array([[single_pixel_params['A']]]),
+                            'width': np.array([[single_pixel_params['width']]]),
+                            'f_center': np.array([[single_pixel_params['f_center']]]),
+                            'f_delta': np.array([[single_pixel_params['f_delta']]])
                         })
                     
                     print("\nSpectrum Analysis Results:")
@@ -1042,21 +1063,16 @@ def main():
             
             experiment_dir = input("\nEnter the experiment directory path: ").strip()
             
-            # Verify the directory exists
             if not os.path.exists(experiment_dir):
                 print(f"Error: Could not find the directory at: {experiment_dir}")
                 continue
 
             try:
-                # Find all relevant files in the experiment directory
                 dir_contents = os.listdir(experiment_dir)
-                
-                # Find files by pattern matching
                 fitted_params_file = None
                 data_file = None
                 json_file = None
                 
-                # Extract experiment number from the directory name
                 dir_match = re.search(r'experiment_(\d+)$', experiment_dir)
                 if not dir_match:
                     print("Error: Directory name doesn't match expected format 'experiment_[number]'")
@@ -1064,12 +1080,10 @@ def main():
                     
                 experiment_number = dir_match.group(1)
                 
-                # Look for files with matching experiment number
                 fitted_params_file = os.path.join(experiment_dir, f"lorentzian_params_{experiment_number}.npy")
                 data_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.npy")
                 json_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.json")
                 
-                # Verify all required files exist
                 missing_files = []
                 if not os.path.exists(fitted_params_file):
                     missing_files.append("Fitted parameters file")
@@ -1084,7 +1098,6 @@ def main():
                         print(f"  - {missing}")
                     continue
 
-                # Launch the fit checker
                 print("\nInitializing fit checker with:")
                 print(f"Experiment directory: {experiment_dir}")
                 print(f"Experiment number: {experiment_number}")
