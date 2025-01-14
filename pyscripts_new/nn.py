@@ -95,18 +95,18 @@ def get_training_config(config_name='default'):
             f_delta_loss_weight=1.0
         ),
 
-        'focus_on_frequency': TrainingConfig(
+        'better': TrainingConfig(
             initial_units=2048,
             second_units=1024,
-            dropout_rate=0.1,
+            dropout_rate=0.2,
             learning_rate=1e-5,  # Even slower learning
-            batch_size=32,  # Smaller batches
+            batch_size=128,  # Smaller batches
             epochs=30,  # More epochs
             I0_loss_weight=1.0,
             A_loss_weight=1.5,
             width_loss_weight=30.0,
-            f_center_loss_weight=30.0,
-            f_delta_loss_weight=30.0
+            f_center_loss_weight=15.0,
+            f_delta_loss_weight=20.0
         ),
 
         'quick_test': TrainingConfig(
@@ -138,16 +138,27 @@ class ODMRDataProcessor:
     def preprocess_data(self, df):
         X = df[self.raw_freq_columns].values
         y = df[self.param_columns].values
+
+        # Standardize inputs
         X_scaled = self.input_scaler.fit_transform(X)
+
+        # Process outputs with appropriate scaling
         y_processed = np.zeros_like(y)
         for i, param in enumerate(self.param_columns):
-            if param in ['width', 'f_delta']:
-                # Don't log transform width and f_delta
+            if param == 'f_center':
+                # Center frequency is already in a good range (2.82-2.94)
+                # Just standardize
                 y_processed[:, i] = self.scalers[param].fit_transform(
                     y[:, i].reshape(-1, 1)
                 ).ravel()
-            else:
-                # Log transform other parameters
+            elif param in ['width', 'f_delta']:
+                # These need to be positive and are small numbers
+                # Log transform then standardize
+                y_processed[:, i] = self.scalers[param].fit_transform(
+                    np.log1p(y[:, i].reshape(-1, 1))
+                ).ravel()
+            else:  # I0, A
+                # Large numbers, log transform then standardize
                 y_processed[:, i] = self.scalers[param].fit_transform(
                     np.log1p(y[:, i].reshape(-1, 1))
                 ).ravel()
@@ -156,17 +167,22 @@ class ODMRDataProcessor:
     def inverse_transform_outputs(self, y_scaled):
         y_orig = np.zeros_like(y_scaled)
         for i, param in enumerate(self.param_columns):
-            y_orig[:, i] = np.expm1(
-                self.scalers[param].inverse_transform(y_scaled[:, i].reshape(-1, 1))
-            ).ravel()
+            if param == 'f_center':
+                # Just inverse standardize
+                y_orig[:, i] = self.scalers[param].inverse_transform(
+                    y_scaled[:, i].reshape(-1, 1)
+                ).ravel()
+            else:
+                # Inverse standardize then exp
+                y_orig[:, i] = np.expm1(
+                    self.scalers[param].inverse_transform(
+                        y_scaled[:, i].reshape(-1, 1)
+                    )
+                ).ravel()
         return y_orig
 
 
 def parameter_specific_losses(config=None):
-    """
-    Creates improved loss functions for each parameter with appropriate weighting and constraints.
-    """
-
     def get_weight(param):
         if config is None:
             return 1.0
@@ -179,24 +195,20 @@ def parameter_specific_losses(config=None):
             # Base MSE loss
             mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
 
-            # Relative error with safe denominator
-            relative_error = tf.abs(y_true - y_pred) / (tf.abs(y_true) + 1e-7)
+            if param == 'f_center':
+                # Add stronger penalty for deviations
+                return weight * (mse + 0.5 * tf.reduce_mean(tf.abs(y_true - y_pred)))
 
-            # Parameter-specific additional terms
-            if param in ['width', 'f_delta']:
+            elif param in ['width', 'f_delta']:
                 # Ensure positive values and reasonable ranges
                 positivity_penalty = tf.reduce_mean(tf.maximum(0.0, -y_pred))
                 range_penalty = tf.reduce_mean(tf.maximum(0.0, y_pred - 1.0))
+                return weight * (mse + positivity_penalty + range_penalty)
 
-                return weight * (mse + 0.1 * relative_error + positivity_penalty + range_penalty)
-
-            elif param in ['I0', 'A']:
-                # Ensure positive values for intensity parameters
+            else:  # I0, A
+                # Ensure positive values
                 positivity_penalty = tf.reduce_mean(tf.maximum(0.0, -y_pred))
-                return weight * (mse + 0.1 * relative_error + positivity_penalty)
-
-            # Default case (f_center)
-            return weight * (mse + 0.1 * relative_error)
+                return weight * (mse + positivity_penalty)
 
         return loss
 
@@ -210,66 +222,52 @@ def parameter_specific_losses(config=None):
 
 
 def create_improved_model(input_dim=100, config=None):
-    """
-    Creates an improved ODMR model with multi-scale convolutions and separate branches.
-    """
     if config is None:
         config = TrainingConfig()
 
     inputs = tf.keras.Input(shape=(input_dim,))
 
-    # 1. Initial spectrum encoding with multi-scale convolutions
+    # Initial spectrum encoding
     x = tf.keras.layers.Reshape((input_dim, 1))(inputs)
 
-    # Multi-scale feature extraction
-    conv_3 = tf.keras.layers.Conv1D(64, kernel_size=3, padding='same', activation='relu')(x)
-    conv_5 = tf.keras.layers.Conv1D(64, kernel_size=5, padding='same', activation='relu')(x)
-    conv_7 = tf.keras.layers.Conv1D(64, kernel_size=7, padding='same', activation='relu')(x)
+    # Multi-scale convolutions for peak detection
+    conv_outputs = []
+    for kernel_size in [3, 5, 7, 9]:
+        conv = tf.keras.layers.Conv1D(64, kernel_size, padding='same')(x)
+        conv = tf.keras.layers.BatchNormalization()(conv)
+        conv = tf.keras.layers.Activation('relu')(conv)
+        conv_outputs.append(conv)
 
-    # Combine features
-    x = tf.keras.layers.Concatenate()([conv_3, conv_5, conv_7])
+    x = tf.keras.layers.Concatenate()(conv_outputs)
 
-    # Additional feature processing
-    x = tf.keras.layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Conv1D(128, kernel_size=3, padding='same', activation='relu')(x)
-    x = tf.keras.layers.BatchNormalization()(x)
+    # Add attention for peak regions
+    attention = tf.keras.layers.Conv1D(1, 1, activation='tanh')(x)
+    attention = tf.keras.layers.Softmax(axis=1)(attention)
+    x = tf.keras.layers.Multiply()([x, attention])
 
     # Global features
     x_avg = tf.keras.layers.GlobalAveragePooling1D()(x)
     x_max = tf.keras.layers.GlobalMaxPooling1D()(x)
     x = tf.keras.layers.Concatenate()([x_avg, x_max])
 
-    # 2. Separate processing branches
-    # Frequency branch (more complex features)
-    frequency_branch = tf.keras.layers.Dense(1024, activation='relu')(x)
-    frequency_branch = tf.keras.layers.BatchNormalization()(frequency_branch)
-    frequency_branch = tf.keras.layers.Dropout(0.2)(frequency_branch)
-    frequency_branch = tf.keras.layers.Dense(512, activation='relu')(frequency_branch)
-    frequency_branch = tf.keras.layers.BatchNormalization()(frequency_branch)
-    frequency_branch = tf.keras.layers.Dense(256, activation='relu')(frequency_branch)
-    frequency_branch = tf.keras.layers.BatchNormalization()(frequency_branch)
+    # Separate branches for different parameter types
+    # f_center branch (direct output, already in good range)
+    f_center_branch = tf.keras.layers.Dense(256, activation='relu')(x)
+    f_center_branch = tf.keras.layers.BatchNormalization()(f_center_branch)
+    f_center_branch = tf.keras.layers.Dense(128, activation='relu')(f_center_branch)
+    f_center_output = tf.keras.layers.Dense(1, name='f_center')(f_center_branch)
 
-    # Intensity branch (simpler features)
+    # Width and f_delta branch (small positive numbers)
+    width_branch = tf.keras.layers.Dense(256, activation='relu')(x)
+    width_branch = tf.keras.layers.BatchNormalization()(width_branch)
+    width_output = tf.keras.layers.Dense(1, activation='sigmoid', name='width')(width_branch)
+    f_delta_output = tf.keras.layers.Dense(1, activation='sigmoid', name='f_delta')(width_branch)
+
+    # Intensity branch (large positive numbers)
     intensity_branch = tf.keras.layers.Dense(256, activation='relu')(x)
     intensity_branch = tf.keras.layers.BatchNormalization()(intensity_branch)
-    intensity_branch = tf.keras.layers.Dense(128, activation='relu')(intensity_branch)
-    intensity_branch = tf.keras.layers.BatchNormalization()(intensity_branch)
-
-    # 3. Output layers with appropriate constraints
-    # Intensity outputs
     i0_output = tf.keras.layers.Dense(1, activation='softplus', name='I0')(intensity_branch)
     a_output = tf.keras.layers.Dense(1, activation='softplus', name='A')(intensity_branch)
-
-    # Frequency outputs
-    # Width needs to be small but positive
-    width_output = tf.keras.layers.Dense(1, activation='sigmoid', name='width')(frequency_branch)
-
-    # Center frequency should be in measurement range
-    f_center_output = tf.keras.layers.Dense(1, name='f_center')(frequency_branch)
-
-    # Frequency separation should be positive
-    f_delta_output = tf.keras.layers.Dense(1, activation='sigmoid', name='f_delta')(frequency_branch)
 
     model = tf.keras.Model(
         inputs=inputs,
@@ -284,6 +282,7 @@ def train_improved_model(X_train, y_train, X_val, y_val, config=None, epochs=Non
     Improved training function with better learning rate scheduling and monitoring.
     """
     model = create_improved_model(X_train.shape[1], config)
+    print(config)
 
     # Print model summary
     print("\nModel Architecture:")
@@ -536,8 +535,7 @@ def main():
         wandb.agent(sweep_id, train_model_wandb, count=5)  # Will run 20 different configurations
         return None, None, None
     else:
-        config = get_training_config('focus_on_frequency')
-        print(config)
+        config = get_training_config('better')
         return regular_training(config)
 
 
