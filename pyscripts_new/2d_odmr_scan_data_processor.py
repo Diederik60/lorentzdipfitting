@@ -17,6 +17,36 @@ import re
 from matplotlib.widgets import Slider, Button
 
 
+def organize_experiment_files(experiment_number, original_data_file, original_json_file, fitted_params_file, base_output_dir):
+    """
+    Organize experiment files by copying them to a dedicated experiment directory.
+    """
+    # Create experiment-specific directory
+    experiment_dir = os.path.join(base_output_dir, f"experiment_{experiment_number}")
+    os.makedirs(experiment_dir, exist_ok=True)
+    
+    # Define new file paths - now directly in the experiment directory
+    new_data_file = os.path.join(experiment_dir, os.path.basename(original_data_file))
+    new_json_file = os.path.join(experiment_dir, os.path.basename(original_json_file))
+    new_params_file = os.path.join(experiment_dir, os.path.basename(fitted_params_file))
+    
+    # Copy files to new location
+    import shutil
+    shutil.copy2(original_data_file, new_data_file)
+    shutil.copy2(original_json_file, new_json_file)
+    
+    # For the fitted params, we might need to move rather than copy if it's temporary
+    if os.path.exists(fitted_params_file):
+        shutil.move(fitted_params_file, new_params_file)
+    
+    print(f"\nOrganized experiment files in: {experiment_dir}")
+    print(f"Copied:")
+    print(f"  - Original data file")
+    print(f"  - JSON parameters file")
+    print(f"  - Fitted parameters file")
+    
+    return new_data_file, new_json_file, new_params_file
+
 def get_experiment_number(filename):
     """Extract experiment number from filename with format '2D_ODMR_scan_{number}.npy'"""
     pattern = r'2D_ODMR_scan_(\d+)\.npy$'
@@ -25,12 +55,7 @@ def get_experiment_number(filename):
 
 def process_directory(directory_path, method='trf', output_dir="./fitted_parameters"):
     """
-    Recursively process ODMR datasets in the specified directory and its subdirectories.
-    
-    Args:
-        directory_path (str): Path to directory containing .npy and .json files
-        method (str): Optimization method ('trf' or 'lm')
-        output_dir (str): Directory to save fitted parameters
+    Recursively process ODMR datasets and organize results
     """
     directory = Path(directory_path)
     
@@ -44,16 +69,12 @@ def process_directory(directory_path, method='trf', output_dir="./fitted_paramet
             subdir_output = Path(output_dir) / subdir.name
             process_directory(subdir, method=method, output_dir=str(subdir_output))
     
-    # Then process any ODMR files in the current directory
+    # Find all ODMR scan files in current directory
     npy_files = list(directory.glob('2D_ODMR_scan_*.npy'))
     total_files = len(npy_files)
     
     if total_files > 0:
         print(f"\nFound {total_files} matching ODMR scan files in {directory_path}")
-        
-        # Create output directory for current directory
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
         
         for idx, npy_file in enumerate(npy_files, 1):
             experiment_number = get_experiment_number(str(npy_file))
@@ -62,7 +83,6 @@ def process_directory(directory_path, method='trf', output_dir="./fitted_paramet
                 continue
                 
             json_file = directory / f'2D_ODMR_scan_{experiment_number}.json'
-            
             if not json_file.exists():
                 print(f"No matching JSON file found for {npy_file}")
                 continue
@@ -71,13 +91,14 @@ def process_directory(directory_path, method='trf', output_dir="./fitted_paramet
             print(f"Processing experiment {experiment_number}")
             
             try:
-                # Initialize analyzer for this dataset
-                analyzer = ODMRAnalyzer(str(npy_file), str(json_file), experiment_number)
+                # Create experiment-specific output directory
+                experiment_output_dir = os.path.join(output_dir, f"experiment_{experiment_number}")
                 
-                # Fit the data
+                # Initialize analyzer and process data
+                analyzer = ODMRAnalyzer(str(npy_file), str(json_file), experiment_number)
                 fitted_params = analyzer.fit_double_lorentzian(
                     method=method,
-                    output_dir=str(output_path)
+                    output_dir=experiment_output_dir
                 )
                 
                 print(f"Successfully processed experiment {experiment_number}")
@@ -283,6 +304,10 @@ class ODMRAnalyzer:
         # Add a flag to control profiling
         self.profiling_enabled = enable_profiling
         
+        # store file paths
+        self.data_file = data_file
+        self.json_file = json_file
+
         # Only create profiler if enabled
         if self.profiling_enabled:
             self.profiler = cProfile.Profile()
@@ -781,32 +806,45 @@ class ODMRAnalyzer:
         ax.set_title('ODMR Contrast Map')
         return fig, ax, contrast_map
 
-    def save_fitted_parameters(self, fitted_params, output_dir):
+    def save_fitted_parameters(self, fitted_params, base_output_dir):
         """
-        Save fitted parameters as a single .npy file
+        Save fitted parameters and organize related files in a single experiment directory.
         
-        Args:
-            fitted_params (dict): Dictionary of fitted parameter arrays
-            output_dir (str): Directory to save parameters
+        This method creates a directory structure like:
+        base_output_dir/
+            experiment_[number]/
+                lorentzian_params_[number].npy
+                2D_ODMR_scan_[number].npy
+                2D_ODMR_scan_[number].json
         """
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
+        # Create the experiment-specific directory
+        experiment_dir = os.path.join(base_output_dir, f"experiment_{self.experiment_number}")
+        os.makedirs(experiment_dir, exist_ok=True)
         
-        # Collect parameters in a specific order
+        # Define all file paths within the experiment directory
+        params_file = os.path.join(experiment_dir, f"lorentzian_params_{self.experiment_number}.npy")
+        new_data_file = os.path.join(experiment_dir, os.path.basename(self.data_file))
+        new_json_file = os.path.join(experiment_dir, os.path.basename(self.json_file))
+        
+        # Save the fitted parameters
         param_order = ['I0', 'A', 'width', 'f_center', 'f_delta']
-        
-        # Stack parameters along the third axis
         stacked_params = np.stack([fitted_params[param] for param in param_order], axis=-1)
+        np.save(params_file, stacked_params)
         
-        # Generate filename
-        filepath = os.path.join(output_dir, f"lorentzian_params_{self.experiment_number}.npy")
+        # Copy the original data files
+        import shutil
+        shutil.copy2(self.data_file, new_data_file)
+        shutil.copy2(self.json_file, new_json_file)
         
-        # Save as single .npy file
-        np.save(filepath, stacked_params)
-        print(f"Fitted parameters saved to {filepath}")
+        print(f"\nOrganized experiment files in: {experiment_dir}")
+        print(f"Saved:")
+        print(f"  - Fitted parameters: {os.path.basename(params_file)}")
+        print(f"  - Original data: {os.path.basename(new_data_file)}")
+        print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
         print(f"Saved array shape: {stacked_params.shape}")
-        return filepath
-
+        
+        return experiment_dir, params_file
+    
     def analyze_spectrum(self, x, y, fitted_params=None):
         """
         Comprehensive spectrum analysis for a specific pixel
@@ -856,9 +894,7 @@ class ODMRAnalyzer:
     
 
 def main():
-    experiment_number = 1730558912
-
-    # C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_1730558912.npy
+    experiment_number = 1731005879
 
     data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.npy'
     json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.json'
@@ -871,44 +907,185 @@ def main():
         print("1. Perform experiment fitting and save parameters")
         print("2. Analyze single pixel spectrum")
         print("3. Batch process directory")
-        print("4. Check fitted results")  # New option
+        print("4. Check fitted results")
         print("5. Exit")
         
         choice = input("Enter your choice (1/2/3/4/5): ")
         
         if choice == '1':
-            # Existing code for option 1
             method_choice = input("Choose optimization method (trf/lm): ").lower()
             while method_choice not in ['trf', 'lm']:
                 print("Invalid choice. Please choose 'trf' or 'lm'")
                 method_choice = input("Choose optimization method (trf/lm): ").lower()
             
-            output_dir = "./fitted_parameters"
-            fitted_params = analyzer.fit_double_lorentzian(method=method_choice, output_dir=output_dir)
+            base_output_dir = "./fitted_parameters"
+            # Now the save_fitted_parameters method returns both the directory and the params file path
+            experiment_dir, fitted_params_file = analyzer.fit_double_lorentzian(
+                method=method_choice, 
+                output_dir=base_output_dir
+            )
             
-            # After fitting, automatically launch the fit checker
             print("\nWould you like to check the fitted results?")
             check_choice = input("Enter y/n: ").lower()
             if check_choice == 'y':
-                fitted_params_file = f"{output_dir}/lorentzian_params_{experiment_number}.npy"
-                checker = ODMRFitChecker(fitted_params_file, data_file, json_file)
-                checker.create_interactive_viewer()
+                try:
+                    # Construct the paths based on the experiment directory
+                    data_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.npy")
+                    json_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.json")
+                    
+                    # Verify all files exist
+                    if not all(os.path.exists(f) for f in [fitted_params_file, data_file, json_file]):
+                        print("\nError: Some required files are missing.")
+                        print("Expected files in:", experiment_dir)
+                        print(f"  - {os.path.basename(fitted_params_file)}")
+                        print(f"  - {os.path.basename(data_file)}")
+                        print(f"  - {os.path.basename(json_file)}")
+                        continue
+                    
+                    print("\nInitializing fit checker...")
+                    checker = ODMRFitChecker(fitted_params_file, data_file, json_file)
+                    checker.create_interactive_viewer()
+                    
+                except Exception as e:
+                    print(f"\nError launching fit checker: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
 
-        # ... existing code for options 2 and 3 ...
+        elif choice == '2':
+            # Single pixel analysis
+            try:
+                x = int(input("Enter x coordinate (0-" + str(analyzer.data.shape[0]-1) + "): "))
+                y = int(input("Enter y coordinate (0-" + str(analyzer.data.shape[1]-1) + "): "))
+                
+                print(f"Attempting to process pixel at coordinates: x={x}, y={y}")
+                
+                try:
+                    pixel = analyzer.data[x, y, :]
+                    single_pixel_params = analyzer.fit_single_pixel(pixel, analyzer.freq_axis)
+                    
+                    # Plot the pixel spectrum with fitted curve
+                    fig_spectrum, ax_spectrum = analyzer.plot_pixel_spectrum(
+                        x, y, 
+                        fit_result={
+                            'I0': single_pixel_params['I0'],
+                            'A': single_pixel_params['A'],
+                            'width': single_pixel_params['width'],
+                            'f_center': single_pixel_params['f_center'],
+                            'f_delta': single_pixel_params['f_delta']
+                        }
+                    )
+                    plt.show()
+
+                    # Analyze and display results
+                    analysis = analyzer.analyze_spectrum(x, y, 
+                        fitted_params={
+                            'I0': single_pixel_params['I0'],
+                            'A': single_pixel_params['A'],
+                            'width': single_pixel_params['width'],
+                            'f_center': single_pixel_params['f_center'],
+                            'f_delta': single_pixel_params['f_delta']
+                        })
+                    
+                    print("\nSpectrum Analysis Results:")
+                    print(f"Number of dips found: {analysis['num_dips']}")
+                    print("\nDip frequencies (GHz):")
+                    for freq, depth in zip(analysis['dip_frequencies'], analysis['dip_depths']):
+                        print(f"  {freq:.3f} GHz (depth: {depth:.3e})")
+                    print(f"\nTotal contrast: {analysis['contrast']:.3e}")
+                    
+                    print("\nFitted Parameters:")
+                    for key, value in single_pixel_params.items():
+                        print(f"  {key}: {value:.4f}")
+                
+                except Exception as e:
+                    print(f"Error processing pixel: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            except ValueError as ve:
+                print(f"Input error: {ve}")
+                print("Please enter valid integer coordinates.")
+
+        elif choice == '3':
+            # Batch processing
+            directory = input("Enter directory path containing ODMR datasets: ")
+            method_choice = input("Choose optimization method (trf/lm): ").lower()
+            while method_choice not in ['trf', 'lm']:
+                print("Invalid choice. Please choose 'trf' or 'lm'")
+                method_choice = input("Choose optimization method (trf/lm): ").lower()
+            
+            output_dir = input("Enter output directory path (press Enter for default './fitted_parameters'): ")
+            if not output_dir:
+                output_dir = "./fitted_parameters"
+            
+            try:
+                process_directory(directory, method=method_choice, output_dir=output_dir)
+            except Exception as e:
+                print(f"Error during batch processing: {e}")
+                import traceback
+                traceback.print_exc()
 
         elif choice == '4':
-            # New option for checking fits
             print("\nLaunching fit checker...")
-            print("Please specify the fitted parameters file location:")
-            fitted_params_file = input("Enter path to fitted parameters .npy file: ")
+            print("Please specify the directory containing the experiment files.")
+            print("Example format: ./fitted_parameters/experiment_1234567890")
             
-            if not os.path.exists(fitted_params_file):
-                print("Error: File not found")
+            experiment_dir = input("\nEnter the experiment directory path: ").strip()
+            
+            # Verify the directory exists
+            if not os.path.exists(experiment_dir):
+                print(f"Error: Could not find the directory at: {experiment_dir}")
                 continue
-                
+
             try:
+                # Find all relevant files in the experiment directory
+                dir_contents = os.listdir(experiment_dir)
+                
+                # Find files by pattern matching
+                fitted_params_file = None
+                data_file = None
+                json_file = None
+                
+                # Extract experiment number from the directory name
+                dir_match = re.search(r'experiment_(\d+)$', experiment_dir)
+                if not dir_match:
+                    print("Error: Directory name doesn't match expected format 'experiment_[number]'")
+                    continue
+                    
+                experiment_number = dir_match.group(1)
+                
+                # Look for files with matching experiment number
+                fitted_params_file = os.path.join(experiment_dir, f"lorentzian_params_{experiment_number}.npy")
+                data_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.npy")
+                json_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.json")
+                
+                # Verify all required files exist
+                missing_files = []
+                if not os.path.exists(fitted_params_file):
+                    missing_files.append("Fitted parameters file")
+                if not os.path.exists(data_file):
+                    missing_files.append("Original data file")
+                if not os.path.exists(json_file):
+                    missing_files.append("JSON parameters file")
+                    
+                if missing_files:
+                    print("\nError: Some required files are missing:")
+                    for missing in missing_files:
+                        print(f"  - {missing}")
+                    continue
+
+                # Launch the fit checker
+                print("\nInitializing fit checker with:")
+                print(f"Experiment directory: {experiment_dir}")
+                print(f"Experiment number: {experiment_number}")
+                print(f"Found all required files:")
+                print(f"  - Fitted parameters: {os.path.basename(fitted_params_file)}")
+                print(f"  - Original data: {os.path.basename(data_file)}")
+                print(f"  - JSON parameters: {os.path.basename(json_file)}")
+                
                 checker = ODMRFitChecker(fitted_params_file, data_file, json_file)
                 checker.create_interactive_viewer()
+                
             except Exception as e:
                 print(f"Error launching fit checker: {str(e)}")
                 import traceback
