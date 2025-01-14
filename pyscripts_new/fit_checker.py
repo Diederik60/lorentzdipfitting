@@ -151,11 +151,11 @@ class ODMRFitChecker:
 
 def main():
     # Replace these with your actual file paths
-    experiment_number = 1730558912
+    experiment_number = 1730502804
     experiment_folder = 'oct-nov-2024 biosample'
     base_path = fr"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\{experiment_folder}"
     
-    fitted_params_file = f"./fitted_parameters/{experiment_folder}/lorentzian_params_{experiment_number}.npy"
+    fitted_params_file = f"./fitted_parameters_all/lorentzian_params_{experiment_number}.npy"
     original_data_file = f"{base_path}/2D_ODMR_scan_{experiment_number}.npy"
     json_params_file = f"{base_path}/2D_ODMR_scan_{experiment_number}.json"
     

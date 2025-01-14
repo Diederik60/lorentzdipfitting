@@ -1,7 +1,7 @@
+
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
@@ -23,32 +23,38 @@ class ODMRDataProcessor:
     def preprocess_data(self, df):
         X = df[self.raw_freq_columns].values
         y = df[self.param_columns].values
-        
+
         # Print data ranges before preprocessing
         for param in self.param_columns:
             data = df[param].values
             logger.info(f"{param} range: {data.min():.6f} to {data.max():.6f}")
         
-        X_scaled = self.input_scaler.fit_transform(X)
+        # Scale raw frequency features separately
+        scaler_raw_freq = MinMaxScaler()  # Alternative: StandardScaler
+        X_scaled = scaler_raw_freq.fit_transform(X)
+
+        # Handle target variables
         y_processed = np.zeros_like(y)
-        
-        # Store f_center mean for later use
         self.f_center_mean = np.mean(y[:, self.param_columns.index('f_center')])
-        
+
         for i, param in enumerate(self.param_columns):
             data = y[:, i].reshape(-1, 1)
-            if param == 'f_center':
+
+            # Log-transform skewed targets
+            if param in ['I0', 'A']:
+                logger.info(f"Applying log transformation to {param}")
+                data = np.log1p(data)
+                y_processed[:, i] = self.scalers[param].fit_transform(data).ravel()
+            elif param == 'f_center':
                 y_processed[:, i] = ((data - self.f_center_mean) / self.f_center_mean).ravel()
             elif param in ['width', 'f_delta']:
                 y_processed[:, i] = (data / self.f_center_mean).ravel()
-            else:
-                y_processed[:, i] = self.scalers[param].fit_transform(np.log1p(data)).ravel()
         
         return X_scaled, y_processed
 
     def inverse_transform_outputs(self, y_scaled):
         y_orig = np.zeros_like(y_scaled)
-        
+
         for i, param in enumerate(self.param_columns):
             data = y_scaled[:, i].reshape(-1, 1)
             if param == 'f_center':
@@ -57,15 +63,24 @@ class ODMRDataProcessor:
                 y_orig[:, i] = (data * self.f_center_mean).ravel()
             else:
                 y_orig[:, i] = np.expm1(self.scalers[param].inverse_transform(data)).ravel()
-        
+
         return y_orig
+
+    def remove_outliers(self, df, lower_percentile=1, upper_percentile=99):
+        """Remove outliers based on percentiles."""
+        for param in self.param_columns:
+            lower_bound = df[param].quantile(lower_percentile / 100.0)
+            upper_bound = df[param].quantile(upper_percentile / 100.0)
+            df = df[(df[param] >= lower_bound) & (df[param] <= upper_bound)]
+            logger.info(f"Removed outliers for {param}: [{lower_bound}, {upper_bound}]")
+        return df
 
 class ODMRRegressor:
     def __init__(self):
         self.models = {}
         self.param_columns = ['I0', 'A', 'width', 'f_center', 'f_delta']
         self.training_history = {param: {'train': [], 'val': []} for param in self.param_columns}
-        
+
     def create_base_model(self, param):
         base_params = {
             'objective': 'reg:squarederror',
@@ -76,91 +91,60 @@ class ODMRRegressor:
             'colsample_bytree': 0.9,
             'min_child_weight': 1
         }
-        
-        # Parameter-specific adjustments
+
         if param in ['width', 'f_delta']:
-            params = {
-                **base_params,
-                'learning_rate': 0.005,
-                'max_depth': 4,
-                'min_child_weight': 3
-            }
+            params = {**base_params, 'learning_rate': 0.005, 'max_depth': 4, 'min_child_weight': 3}
         elif param == 'f_center':
-            params = {
-                **base_params,
-                'learning_rate': 0.008,
-                'max_depth': 8
-            }
-        else:  # I0, A
+            params = {**base_params, 'learning_rate': 0.008, 'max_depth': 8}
+        else:
             params = base_params
-            
+
         return params
-    
+
     def fit(self, X, y, X_val=None, y_val=None):
-        """Train separate models for each parameter"""
         for i, param in enumerate(self.param_columns):
             logger.info(f"Training model for {param}...")
             params = self.create_base_model(param)
-            
             dtrain = xgb.DMatrix(X, label=y[:, i])
             evaluation = {'train': [], 'eval': []}
-            
+
             if X_val is not None and y_val is not None:
                 dval = xgb.DMatrix(X_val, label=y_val[:, i])
                 evallist = [(dtrain, 'train'), (dval, 'eval')]
-                
-                # Create a proper callback class
-                class CustomCallback(xgb.callback.TrainingCallback):
-                    def __init__(self, evaluation_dict):
-                        self.evaluation_dict = evaluation_dict
 
-                    def after_iteration(self, model, epoch, evals_log):
-                        for key in evals_log:
-                            metric_value = evals_log[key]['rmse'][-1]
-                            if key == 'train':
-                                self.evaluation_dict['train'].append(metric_value)
-                            else:
-                                self.evaluation_dict['eval'].append(metric_value)
-                        return False
-                
                 model = xgb.train(
                     params,
                     dtrain,
                     num_boost_round=1000,
                     evals=evallist,
                     early_stopping_rounds=50,
-                    verbose_eval=100,
-                    callbacks=[CustomCallback(evaluation)]
+                    verbose_eval=100
                 )
             else:
                 model = xgb.train(params, dtrain, num_boost_round=100)
-            
+
             self.models[param] = model
             self.training_history[param] = evaluation
-            
-            # Log feature importance
             importance = model.get_score(importance_type='gain')
-            logger.info(f"\nTop 10 important features for {param}:")
             sorted_imp = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:10]
+            logger.info(f"\nTop 10 important features for {param}:")
             for feat, imp in sorted_imp:
                 logger.info(f"Feature {feat}: {imp:.4f}")
-        
+
     def predict(self, X):
-        """Predict all parameters for given spectra"""
-        # Create DMatrix for prediction
         dtest = xgb.DMatrix(X)
         predictions = np.zeros((X.shape[0], len(self.param_columns)))
-        
-        # Get predictions for each parameter
         for i, param in enumerate(self.param_columns):
             predictions[:, i] = self.models[param].predict(dtest)
-        
         return predictions
 
 def evaluate_predictions(model, X_test, y_test, processor, show_plot=True):
     y_pred = model.predict(X_test)
     y_test_orig = processor.inverse_transform_outputs(y_test)
     y_pred_orig = processor.inverse_transform_outputs(y_pred)
+
+    metrics = {f'{param}_mse': np.mean((y_test_orig[:, i] - y_pred_orig[:, i]) ** 2)
+               for i, param in enumerate(processor.param_columns)}
 
     if show_plot:
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -183,65 +167,35 @@ def evaluate_predictions(model, X_test, y_test, processor, show_plot=True):
                          transform=axes[i].transAxes,
                          verticalalignment='top')
 
-        # Plot training history in the sixth subplot
-        axes[5].set_title('Model Learning Curves')
-        axes[5].set_xlabel('Iterations')
-        axes[5].set_ylabel('RMSE')
-        
-        # Plot learning curves for each parameter
-        for param in processor.param_columns:
-            if model.training_history[param]:  # Check if history exists
-                history = model.training_history[param]
-                train_loss = history['train']
-                val_loss = history['eval']
-                iters = range(1, len(train_loss) + 1)
-                
-                axes[5].plot(iters, train_loss, '--', label=f'{param} (train)', alpha=0.5)
-                axes[5].plot(iters, val_loss, '-', label=f'{param} (val)', alpha=0.5)
-        
-        axes[5].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        axes[5].grid(True)
+        # Add a placeholder for the sixth subplot if unused
+        if len(processor.param_columns) < 6:
+            axes[-1].axis('off')
 
+        # Show the plot
         plt.tight_layout()
         plt.show()
 
-    metrics = {f'{param}_mse': np.mean((y_test_orig[:, i] - y_pred_orig[:, i]) ** 2)
-               for i, param in enumerate(processor.param_columns)}
-
-    return y_pred_orig, metrics
-
-def main():
-    # Load data
-    logger.info("Loading data...")
-    df = pd.read_csv(r"C:\Users\Diederik\Documents\BEP\test.csv")
-    
-    # Initialize processor and preprocess data
-    processor = ODMRDataProcessor()
-    X_scaled, y_scaled = processor.preprocess_data(df)
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y_scaled, test_size=0.2, random_state=42
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42
-    )
-    
-    # Train model
-    logger.info("Training models...")
-    model = ODMRRegressor()
-    model.fit(X_train, y_train, X_val, y_val)
-    
-    # Evaluate
-    logger.info("Evaluating models...")
-    y_pred_orig, metrics = evaluate_predictions(model, X_test, y_test, processor)
-    
-    # Print metrics
-    logger.info("\nFinal Metrics:")
-    for param, mse in metrics.items():
-        logger.info(f"{param}: {mse:.2e}")
-    
-    return model, processor
-
+               
 if __name__ == "__main__":
-    model, processor = main()
+    # Example usage
+    logger.info("Starting script...")
+
+    # Load sample data
+    if os.path.exists("test.csv"):
+        df = pd.read_csv("test.csv")
+        processor = ODMRDataProcessor()
+        regressor = ODMRRegressor()
+
+        # Preprocess the data
+        X_scaled, y_processed = processor.preprocess_data(df)
+
+        # Split data into training and testing sets
+        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_processed, test_size=0.2, random_state=42)
+
+        # Train the model
+        regressor.fit(X_train, y_train, X_test, y_test)
+
+        # Evaluate the model
+        evaluate_predictions(regressor, X_test, y_test, processor)
+    else:
+        logger.error("Sample data file 'sample_data.csv' not found.")
