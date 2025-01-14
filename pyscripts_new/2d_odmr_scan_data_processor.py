@@ -165,13 +165,53 @@ class ODMRFitChecker:
         # Get data dimensions
         self.M, self.N = self.fitted_params.shape[:2]
         
-        # Define parameter names and their indices
-        self.param_info = {
-            'Baseline (I0)': {'index': 0, 'cmap': 'viridis'},
-            'Amplitude (A)': {'index': 1, 'cmap': 'viridis'},
-            'Width': {'index': 2, 'cmap': 'plasma'},
-            'Center Frequency': {'index': 3, 'cmap': 'magma'},
-            'Frequency Splitting': {'index': 4, 'cmap': 'inferno'}
+        # Calculate raw contrast map once
+        self.raw_contrast = np.ptp(self.original_data, axis=2)
+        
+        # Define visualization options combining parameters and derived quantities
+        self.viz_options = {
+            # Original fitting parameters
+            'Baseline (I0)': {
+                'data': self.fitted_params[:, :, 0],
+                'cmap': 'viridis',
+                'label': 'Baseline Intensity (a.u.)'
+            },
+            'Amplitude (A)': {
+                'data': self.fitted_params[:, :, 1],
+                'cmap': 'viridis',
+                'label': 'Dip Amplitude (a.u.)'
+            },
+            'Width': {
+                'data': self.fitted_params[:, :, 2],
+                'cmap': 'plasma',
+                'label': 'Dip Width (GHz)'
+            },
+            'Center Frequency': {
+                'data': self.fitted_params[:, :, 3],
+                'cmap': 'magma',
+                'label': 'Center Frequency (GHz)'
+            },
+            'Frequency Splitting': {
+                'data': self.fitted_params[:, :, 4],
+                'cmap': 'inferno',
+                'label': 'Frequency Splitting (GHz)'
+            },
+            # Additional visualizations
+            'Fitting Contrast': {
+                'data': self.fitted_params[:, :, 1] / self.fitted_params[:, :, 0] * 100,  # A/I0 as percentage
+                'cmap': 'viridis',
+                'label': 'Fitted Contrast (%)'
+            },
+            'Peak Splitting': {
+                'data': self.fitted_params[:, :, 4],  # Same as Frequency Splitting but with different label
+                'cmap': 'magma',
+                'label': 'Peak Splitting (GHz)'
+            },
+            'Raw Contrast': {
+                'data': self.raw_contrast,
+                'cmap': 'viridis',
+                'label': 'Raw Contrast (a.u.)'
+            }
         }
         
     def double_lorentzian(self, f, I0, A, width, f_center, f_delta):
@@ -180,18 +220,18 @@ class ODMRFitChecker:
                A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
     def create_interactive_viewer(self):
-        """Create an interactive plot with parameter selection"""
-        # Set up the figure and subplots
-        self.fig = plt.figure(figsize=(15, 8))
+        """Create an interactive plot with visualization options"""
+        # Set up the figure and subplots with more space for radio buttons
+        self.fig = plt.figure(figsize=(16, 8))
         gs = self.fig.add_gridspec(1, 2, width_ratios=[1, 1])
         self.ax_data = self.fig.add_subplot(gs[0])
         self.ax_map = self.fig.add_subplot(gs[1])
-        plt.subplots_adjust(bottom=0.25, left=0.1)  # Make room for controls
+        plt.subplots_adjust(bottom=0.25, left=0.15)  # More space for controls
         
         # Initial state
         self.x_idx, self.y_idx = 0, 0
         self.full_range = True
-        self.current_param = 'Amplitude (A)'  # Default parameter to display
+        self.current_viz = 'Fitting Contrast'  # Default visualization
         
         # Plot initial spectrum
         self.spectrum_line, = self.ax_data.plot(self.freq_axis, 
@@ -208,15 +248,14 @@ class ODMRFitChecker:
         self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
         
         # Create initial parameter map
-        param_idx = self.param_info[self.current_param]['index']
-        param_map = self.fitted_params[:, :, param_idx]
-        self.map_img = self.ax_map.imshow(param_map.T, origin='lower', 
-                                         cmap=self.param_info[self.current_param]['cmap'])
+        viz_data = self.viz_options[self.current_viz]['data']
+        self.map_img = self.ax_map.imshow(viz_data.T, origin='lower', 
+                                         cmap=self.viz_options[self.current_viz]['cmap'])
         self.pixel_marker, = self.ax_map.plot(self.x_idx, self.y_idx, 'rx')
         
         # Add colorbar
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
-        self.colorbar.set_label(self.current_param)
+        self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
         
         # Set up axis labels
         self.ax_data.set_xlabel('Frequency (GHz)')
@@ -233,26 +272,28 @@ class ODMRFitChecker:
         self.y_slider = Slider(ax_y, 'Y', 0, self.N-1, valinit=0, valstep=1)
         
         # Add button for toggling x-axis range
-        ax_button = plt.axes([0.8, 0.15, 0.15, 0.04])
+        ax_button = plt.axes([0.85, 0.15, 0.1, 0.04])
         self.range_button = Button(ax_button, 'Toggle Range')
         
-        # Add radio buttons for parameter selection
-        ax_radio = plt.axes([0.02, 0.3, 0.12, 0.3])
-        self.param_radio = RadioButtons(ax_radio, list(self.param_info.keys()), 
-                                      active=list(self.param_info.keys()).index(self.current_param))
+        # Add radio buttons for visualization selection with more space
+        ax_radio = plt.axes([0.02, 0.25, 0.12, 0.6])  # Taller radio button area
+        self.viz_radio = RadioButtons(ax_radio, list(self.viz_options.keys()), 
+                                    active=list(self.viz_options.keys()).index(self.current_viz))
+        # Adjust radio button labels for better readability
+        for label in self.viz_radio.labels:
+            label.set_fontsize(8)
         
         # Define update functions
-        def update_param(label):
-            self.current_param = label
-            param_idx = self.param_info[label]['index']
-            param_map = self.fitted_params[:, :, param_idx]
+        def update_viz(label):
+            self.current_viz = label
+            viz_data = self.viz_options[label]['data']
             
             # Update colormap
-            self.map_img.set_data(param_map.T)
-            self.map_img.set_cmap(self.param_info[label]['cmap'])
+            self.map_img.set_data(viz_data.T)
+            self.map_img.set_cmap(self.viz_options[label]['cmap'])
             
             # Update colorbar label
-            self.colorbar.set_label(label)
+            self.colorbar.set_label(self.viz_options[label]['label'])
             
             # Update colorbar limits
             self.map_img.autoscale()
@@ -278,9 +319,12 @@ class ODMRFitChecker:
             # Update pixel marker
             self.pixel_marker.set_data([self.x_idx], [self.y_idx])
             
-            # Update title with fit parameters
+            # Update title with comprehensive information
             param_names = ['I0', 'A', 'w', 'fc', 'fd']
             param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
+            raw_contrast = np.ptp(y_data)
+            fit_contrast = params[1] / params[0] * 100  # A/I0 as percentage
+            param_str += f'\nraw_contrast={raw_contrast:.3f}, fit_contrast={fit_contrast:.1f}%'
             self.ax_data.set_title(f'Pixel ({self.x_idx}, {self.y_idx})\n{param_str}')
             
             # Update y-axis limits
@@ -301,7 +345,7 @@ class ODMRFitChecker:
             self.fig.canvas.draw_idle()
         
         # Connect callbacks
-        self.param_radio.on_clicked(update_param)
+        self.viz_radio.on_clicked(update_viz)
         self.range_button.on_clicked(toggle_range)
         self.x_slider.on_changed(update)
         self.y_slider.on_changed(update)
@@ -936,8 +980,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024 bonded sample\2D_ODMR_scan_1731601991.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024 bonded sample\2D_ODMR_scan_1731601991.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024-prebonded sample\2D_ODMR_scan_1731977720.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024-prebonded sample\2D_ODMR_scan_1731977720.json"
 
     # Initialize analyzer at the start
     analyzer = None
