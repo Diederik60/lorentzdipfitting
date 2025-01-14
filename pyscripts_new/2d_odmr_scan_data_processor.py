@@ -713,7 +713,7 @@ def main():
     # Interactive mode selection
     while True:
         print("\nODMR Analysis Options:")
-        print("1. Perform full dataset fitting and save parameters")
+        print("1. Perform experiment fitting and save parameters")
         print("2. Analyze single pixel spectrum")
         print("3. Batch process directory")
         print("4. Exit")
