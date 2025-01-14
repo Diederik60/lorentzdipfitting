@@ -290,46 +290,39 @@ class ODMRFitChecker:
         plt.show()
 
 class ODMRAnalyzer:
-    def __init__(self, data_file, json_file, experiment_number, enable_profiling=False):
+    def __init__(self, data_file, json_file, enable_profiling=False):
         """
         Initialize ODMR analyzer with data and parameters
         
         Args:
             data_file (str): Path to numpy data file
             json_file (str): Path to JSON parameter file
-            experiment_number (int): Experiment identifier
-            enable_profiling (bool): Whether to enable profiling functionality, turned off by default
+            enable_profiling (bool): Whether to enable profiling functionality
         """
-        #profiler for collectiong information about how much time is spent in every part of the code
-        # Add a flag to control profiling
         self.profiling_enabled = enable_profiling
         
-        # store file paths
+        # Store file paths
         self.data_file = data_file
         self.json_file = json_file
-
+        
         # Only create profiler if enabled
         if self.profiling_enabled:
             self.profiler = cProfile.Profile()
         else:
-            self.profiler = None     
-        
-        self.experiment_number = experiment_number
+            self.profiler = None
 
-        # loading data using the load_data method with timing decorator to inspect the time it takes 
-        self.load_data(data_file, json_file)
-
-        # loading data directly on initialisation
+        # Load data directly on initialization
         self.data = np.load(data_file)
         with open(json_file, 'r') as f:
             self.params = json.load(f)
 
-        self.freq_axis = np.linspace( # creating fequency axis
+        self.freq_axis = np.linspace(
             self.params['min_freq'] / 1e9,  # Convert to GHz
             self.params['max_freq'] / 1e9,
             self.params['num_measurements']
         )
-        self.mean_spectrum = np.mean(self.data, axis=(0, 1)) # calculating mean spectrum
+        self.mean_spectrum = np.mean(self.data, axis=(0, 1))
+
 
     def check_fits(self, fitted_params_file):
         """
@@ -665,15 +658,17 @@ class ODMRAnalyzer:
             return default_values
 
     @timing_decorator    
-    def fit_double_lorentzian(self, tail=5, thresholds=[3, 5], 
-                            error_threshold=0.1, default_values=None, 
-                            method='trf', output_dir=None):
+    def fit_double_lorentzian(self, method='trf', output_dir=None):
         """
         Parallel version of double Lorentzian fitting
         
+        Args:
+            method (str): Fitting method ('trf' or 'lm')
+            output_dir (str): Directory to save results
+            
         Returns:
-            tuple: (experiment_dir, fitted_params_file) containing the paths to:
-                - The experiment directory where all files are stored
+            tuple: (output_dir, fitted_params_file) containing the paths to:
+                - The directory where files are stored
                 - The fitted parameters file
         """
         self.start_profiling()
@@ -687,19 +682,17 @@ class ODMRAnalyzer:
             "f_delta": np.zeros((M, N)),
         }
         
-        if default_values is None:
-            default_values = {"I0": 1.0, "A": 0, "width": 1.0, 
-                            "f_center": np.mean(self.freq_axis), "f_delta": 0.0}
+        default_values = {"I0": 1.0, "A": 0, "width": 1.0, 
+                         "f_center": np.mean(self.freq_axis), "f_delta": 0.0}
 
         print(f"Processing {M*N} pixels using multiprocessing...")
         
-        # Prepare the data for parallel processing
         num_cores = mp.cpu_count()
         print(f"Using {num_cores} CPU cores")
         
-        # Create arguments for each row
+        # Prepare arguments for parallel processing
         row_args = [(m, self.data, self.freq_axis, default_values, method) 
-                    for m in range(M)]
+                   for m in range(M)]
                 
         # Process rows in parallel
         total_processed = 0
@@ -707,34 +700,30 @@ class ODMRAnalyzer:
         
         with mp.Pool(processes=num_cores) as pool:
             for m, row_results in tqdm(pool.imap(process_pixel_row, row_args), 
-                                    total=M, 
-                                    desc="Processing rows"):
-                # Store results
+                                     total=M, 
+                                     desc="Processing rows"):
                 for key in fitted_params:
                     fitted_params[key][m] = row_results[key]
                 
                 total_processed += N
-                if total_processed % (N * 2) == 0:  # Report every 2 rows
+                if total_processed % (N * 2) == 0:
                     elapsed_time = time.time() - start_time
                     pixels_per_second = total_processed / elapsed_time
                     remaining_pixels = (M * N) - total_processed
                     remaining_time = remaining_pixels / pixels_per_second
                     
-                    # print statements for checking
                     print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
                     print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
         
-        self.stop_profiling()
-        
         if output_dir is not None:
-            # Create the experiment-specific directory
-            experiment_dir = os.path.join(output_dir, f"experiment_{self.experiment_number}")
-            os.makedirs(experiment_dir, exist_ok=True)
+            # Create output directory if it doesn't exist
+            os.makedirs(output_dir, exist_ok=True)
             
-            # Define all file paths
-            fitted_params_file = os.path.join(experiment_dir, f"lorentzian_params_{self.experiment_number}.npy")
-            new_data_file = os.path.join(experiment_dir, os.path.basename(self.data_file))
-            new_json_file = os.path.join(experiment_dir, os.path.basename(self.json_file))
+            # Generate filenames based on input files
+            base_name = os.path.splitext(os.path.basename(self.data_file))[0]
+            fitted_params_file = os.path.join(output_dir, f"{base_name}_fitted_params.npy")
+            new_data_file = os.path.join(output_dir, os.path.basename(self.data_file))
+            new_json_file = os.path.join(output_dir, os.path.basename(self.json_file))
             
             # Save the fitted parameters
             param_order = ['I0', 'A', 'width', 'f_center', 'f_delta']
@@ -746,20 +735,17 @@ class ODMRAnalyzer:
             shutil.copy2(self.data_file, new_data_file)
             shutil.copy2(self.json_file, new_json_file)
             
-            print(f"\nOrganized experiment files in: {experiment_dir}")
+            print(f"\nSaved files in: {output_dir}")
             print(f"Saved:")
             print(f"  - Fitted parameters: {os.path.basename(fitted_params_file)}")
             print(f"  - Original data: {os.path.basename(new_data_file)}")
             print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
             print(f"Saved array shape: {stacked_params.shape}")
             
-            self.stop_profiling()
-            
-            # Return both the directory and the fitted parameters file path
-            return experiment_dir, fitted_params_file
+            return output_dir, fitted_params_file
         
         self.stop_profiling()
-        return None, None  # Return None values if no output directory was specified
+        return None, None
 
     def plot_pixel_spectrum(self, x, y, smooth=True, fit_result=None):
         """
@@ -928,13 +914,9 @@ class ODMRAnalyzer:
     
 
 def main():
-    experiment_number = 1731005879
 
-    data_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.npy'
-    json_file = fr'C:\Users\Diederik\Documents\BEP\lorentzdipfitting\data\dataset_1_biosample\2D_ODMR_scan_{experiment_number}.json'
-    
-    # Initialize analyzer
-    analyzer = ODMRAnalyzer(data_file, json_file, experiment_number, enable_profiling=False)
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024 bonded sample\2D_ODMR_scan_1731601991.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024 bonded sample\2D_ODMR_scan_1731601991.json"
 
     while True:
         print("\nODMR Analysis Options:")
@@ -947,43 +929,37 @@ def main():
         choice = input("Enter your choice (1/2/3/4/5): ")
         
         if choice == '1':
+            if not all(os.path.exists(f) for f in [data_file, json_file]):
+                print("Error: One or more input files not found.")
+                continue
+                
             method_choice = input("Choose optimization method (trf/lm): ").lower()
             while method_choice not in ['trf', 'lm']:
                 print("Invalid choice. Please choose 'trf' or 'lm'")
                 method_choice = input("Choose optimization method (trf/lm): ").lower()
             
-            base_output_dir = "./fitted_parameters"
-            # Now the save_fitted_parameters method returns both the directory and the params file path
-            experiment_dir, fitted_params_file = analyzer.fit_double_lorentzian(
-                method=method_choice, 
-                output_dir=base_output_dir
+            output_dir = input("Enter output directory path (press Enter for default './fitted_parameters'): ")
+            if not output_dir:
+                output_dir = "./fitted_parameters"
+            
+            # Initialize analyzer and process data
+            analyzer = ODMRAnalyzer(data_file, json_file, enable_profiling=False)
+            output_dir, fitted_params_file = analyzer.fit_double_lorentzian(
+                method=method_choice,
+                output_dir=output_dir
             )
             
-            print("\nWould you like to check the fitted results?")
-            check_choice = input("Enter y/n: ").lower()
-            if check_choice == 'y':
-                try:
-                    # Construct the paths based on the experiment directory
-                    data_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.npy")
-                    json_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.json")
-                    
-                    # Verify all files exist
-                    if not all(os.path.exists(f) for f in [fitted_params_file, data_file, json_file]):
-                        print("\nError: Some required files are missing.")
-                        print("Expected files in:", experiment_dir)
-                        print(f"  - {os.path.basename(fitted_params_file)}")
-                        print(f"  - {os.path.basename(data_file)}")
-                        print(f"  - {os.path.basename(json_file)}")
-                        continue
-                    
-                    print("\nInitializing fit checker...")
-                    checker = ODMRFitChecker(fitted_params_file, data_file, json_file)
-                    checker.create_interactive_viewer()
-                    
-                except Exception as e:
-                    print(f"\nError launching fit checker: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+            if fitted_params_file:
+                print("\nWould you like to check the fitted results?")
+                check_choice = input("Enter y/n: ").lower()
+                if check_choice == 'y':
+                    try:
+                        checker = ODMRFitChecker(fitted_params_file, data_file, json_file)
+                        checker.create_interactive_viewer()
+                    except Exception as e:
+                        print(f"\nError launching fit checker: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
 
         elif choice == '2':
             # Single pixel analysis
