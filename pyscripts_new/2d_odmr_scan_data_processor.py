@@ -664,13 +664,17 @@ class ODMRAnalyzer:
                 }
             return default_values
 
-    
-    @timing_decorator  # Add this decorator to measure the overall function execution time
+    @timing_decorator    
     def fit_double_lorentzian(self, tail=5, thresholds=[3, 5], 
-                         error_threshold=0.1, default_values=None, 
-                         method='trf', output_dir=None):
+                            error_threshold=0.1, default_values=None, 
+                            method='trf', output_dir=None):
         """
         Parallel version of double Lorentzian fitting
+        
+        Returns:
+            tuple: (experiment_dir, fitted_params_file) containing the paths to:
+                - The experiment directory where all files are stored
+                - The fitted parameters file
         """
         self.start_profiling()
         
@@ -723,9 +727,39 @@ class ODMRAnalyzer:
         self.stop_profiling()
         
         if output_dir is not None:
-            self.save_fitted_parameters(fitted_params, output_dir)
+            # Create the experiment-specific directory
+            experiment_dir = os.path.join(output_dir, f"experiment_{self.experiment_number}")
+            os.makedirs(experiment_dir, exist_ok=True)
+            
+            # Define all file paths
+            fitted_params_file = os.path.join(experiment_dir, f"lorentzian_params_{self.experiment_number}.npy")
+            new_data_file = os.path.join(experiment_dir, os.path.basename(self.data_file))
+            new_json_file = os.path.join(experiment_dir, os.path.basename(self.json_file))
+            
+            # Save the fitted parameters
+            param_order = ['I0', 'A', 'width', 'f_center', 'f_delta']
+            stacked_params = np.stack([fitted_params[param] for param in param_order], axis=-1)
+            np.save(fitted_params_file, stacked_params)
+            
+            # Copy the original data files
+            import shutil
+            shutil.copy2(self.data_file, new_data_file)
+            shutil.copy2(self.json_file, new_json_file)
+            
+            print(f"\nOrganized experiment files in: {experiment_dir}")
+            print(f"Saved:")
+            print(f"  - Fitted parameters: {os.path.basename(fitted_params_file)}")
+            print(f"  - Original data: {os.path.basename(new_data_file)}")
+            print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
+            print(f"Saved array shape: {stacked_params.shape}")
+            
+            self.stop_profiling()
+            
+            # Return both the directory and the fitted parameters file path
+            return experiment_dir, fitted_params_file
         
-        return fitted_params
+        self.stop_profiling()
+        return None, None  # Return None values if no output directory was specified
 
     def plot_pixel_spectrum(self, x, y, smooth=True, fit_result=None):
         """
