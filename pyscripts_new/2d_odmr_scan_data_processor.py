@@ -130,22 +130,66 @@ def process_pixel_row(args):
         "width": np.zeros(N),
         "f_center": np.zeros(N),
         "f_delta": np.zeros(N),
+        "quality_score": np.zeros(N),  # Added quality score array
     }
     
     for n in range(N):
         result = ODMRAnalyzer.fit_single_pixel(data[m, n, :], freq_axis, 
                                              default_values, method)
+        
+        # Calculate fitted curve for quality assessment
+        fitted_curve = ODMRAnalyzer.double_dip_func(
+            freq_axis,
+            result['I0'],
+            result['A'],
+            result['width'],
+            result['f_center'],
+            result['f_delta']
+        )
+        
+        # Calculate quality score
+        quality_score = calculate_fit_quality(data[m, n, :], fitted_curve)
+        
+        # Store all results including quality score
         for key in row_results:
-            row_results[key][n] = result[key]
+            if key == 'quality_score':
+                row_results[key][n] = quality_score
+            else:
+                row_results[key][n] = result[key]
     
     return m, row_results
 
+def calculate_fit_quality(original_data, fitted_curve):
+    """
+    Calculate a single quality metric for ODMR fit assessment.
+    Returns a value between 0 (poor fit) and 1 (perfect fit).
+    
+    The metric is: 1 - NRMSE (Normalized Root Mean Square Error)
+    This gives us an intuitive score where:
+    - 1.0 means perfect fit
+    - 0.0 means the fit is as bad as a flat line at the mean
+    - Values around 0.9 or higher typically indicate good fits
+    """
+    # Calculate RMSE (Root Mean Square Error)
+    rmse = np.sqrt(np.mean((original_data - fitted_curve) ** 2))
+    
+    # Normalize by the range of the data
+    data_range = np.ptp(original_data)
+    if data_range == 0:
+        return 0  # If data is flat, fit quality is 0
+        
+    nrmse = rmse / data_range
+    
+    # Convert to a score between 0 and 1
+    quality_score = 1 - nrmse
+    
+    return max(0, quality_score)  # Ensure non-negative score
+
+
 class ODMRFitChecker:
     def __init__(self, fitted_params_file, original_data_file, json_params_file):
-        """
-        Initialize the ODMR fit checker with data files
-        """
-        # Load the fitted parameters (shape: M x N x 5)
+        """Initialize with quality assessment capabilities"""
+        # Load the fitted parameters (shape: M x N x 6 now, including quality score)
         self.fitted_params = np.load(fitted_params_file)
         
         # Load original data
@@ -154,10 +198,10 @@ class ODMRFitChecker:
         # Load frequency parameters
         with open(json_params_file, 'r') as f:
             params = json.load(f)
-            
+        
         # Create frequency axis
         self.freq_axis = np.linspace(
-            params['min_freq'] / 1e9,  # Convert to GHz
+            params['min_freq'] / 1e9,
             params['max_freq'] / 1e9,
             params['num_measurements']
         )
@@ -165,12 +209,29 @@ class ODMRFitChecker:
         # Get data dimensions
         self.M, self.N = self.fitted_params.shape[:2]
         
-        # Calculate maps that require original data
-        self.pl_map = np.mean(self.original_data, axis=2)  # Average PL intensity
-        self.raw_contrast = np.ptp(self.original_data, axis=2)  # Max-min difference
+        # Extract quality scores (last parameter in the stack)
+        self.quality_scores = self.fitted_params[:, :, -1]
         
-        # Define visualization options combining parameters and derived quantities
+        # Calculate success statistics
+        self.success_rate = np.mean(self.quality_scores >= 0.9) * 100
+        self.mean_quality = np.mean(self.quality_scores)
+        
+        # Calculate maps
+        self.pl_map = np.mean(self.original_data, axis=2)
+        self.raw_contrast = np.ptp(self.original_data, axis=2)
+
+        # Store the fitting parameters and quality scores separately
+        # First 5 columns are fitting parameters, last column is quality score
+        self.fitting_params = self.fitted_params[:, :, :5]  # Extract only fitting parameters
+        self.quality_scores = self.fitted_params[:, :, -1]  # Extract quality scores
+        
+        # Define visualization options
         self.viz_options = {
+            'Fit Quality': {
+                'data': self.quality_scores,
+                'cmap': 'RdYlGn',
+                'label': 'Fit Quality Score (0-1)'
+            },
             'PL Map': {
                 'data': self.pl_map,
                 'cmap': 'viridis',
@@ -182,36 +243,37 @@ class ODMRFitChecker:
                 'label': 'Raw Contrast (a.u.)'
             },
             'Fit Contrast': {
-                'data': self.fitted_params[:, :, 1] / self.fitted_params[:, :, 0] * 100,  # A/I0 as percentage
+                'data': self.fitting_params[:, :, 1] / self.fitting_params[:, :, 0] * 100,
                 'cmap': 'viridis',
                 'label': 'Fitted Contrast (%)'
             },
             'Peak Splitting': {
-                'data': self.fitted_params[:, :, 4],  # f_delta parameter
+                'data': self.fitting_params[:, :, 4],
                 'cmap': 'magma',
                 'label': 'Peak Splitting (GHz)'
             },
             'Frequency Shift': {
-                'data': self.fitted_params[:, :, 3],  # f_center parameter
+                'data': self.fitting_params[:, :, 3],
                 'cmap': 'magma',
                 'label': 'Center Frequency (GHz)'
             },
             'Baseline (I0)': {
-                'data': self.fitted_params[:, :, 0],
+                'data': self.fitting_params[:, :, 0],
                 'cmap': 'viridis',
                 'label': 'Baseline Intensity (a.u.)'
             },
             'Amplitude (A)': {
-                'data': self.fitted_params[:, :, 1],
+                'data': self.fitting_params[:, :, 1],
                 'cmap': 'viridis',
                 'label': 'Dip Amplitude (a.u.)'
             },
             'Width': {
-                'data': self.fitted_params[:, :, 2],
+                'data': self.fitting_params[:, :, 2],
                 'cmap': 'plasma',
                 'label': 'Dip Width (GHz)'
             }
         }
+
         
     def double_lorentzian(self, f, I0, A, width, f_center, f_delta):
         """Calculate double Lorentzian function with given parameters."""
@@ -219,18 +281,18 @@ class ODMRFitChecker:
                A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
     def create_interactive_viewer(self):
-        """Create an interactive plot with visualization options"""
-        # Set up the figure and subplots with more space for radio buttons
+        """Create interactive viewer with quality assessment display"""
+        # Set up the figure
         self.fig = plt.figure(figsize=(16, 8))
         gs = self.fig.add_gridspec(1, 2, width_ratios=[1, 1])
         self.ax_data = self.fig.add_subplot(gs[0])
         self.ax_map = self.fig.add_subplot(gs[1])
-        plt.subplots_adjust(bottom=0.25, left=0.15)  # More space for controls
+        plt.subplots_adjust(bottom=0.25, left=0.15)
         
         # Initial state
         self.x_idx, self.y_idx = 0, 0
         self.full_range = True
-        self.current_viz = 'Fit Contrast'  # Default visualization
+        self.current_viz = 'Fit Quality'  # Start with quality visualization
         
         # Plot initial spectrum
         self.spectrum_line, = self.ax_data.plot(self.freq_axis, 
@@ -238,7 +300,7 @@ class ODMRFitChecker:
                                               'b.', label='Data')
         
         # Calculate and plot initial fit
-        params = self.fitted_params[self.x_idx, self.y_idx]
+        params = self.fitted_params[self.x_idx, self.y_idx, :5]  # Exclude quality score
         fitted_curve = self.double_lorentzian(self.freq_axis, *params)
         self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', 
                                           label='Fit')
@@ -256,12 +318,19 @@ class ODMRFitChecker:
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
         self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
         
+        # Add overall statistics to title
+        self.ax_map.set_title(
+            f'Success Rate: {self.success_rate:.1f}%\n'
+            f'Mean Quality: {self.mean_quality:.3f}'
+        )
+        
         # Set up axis labels
         self.ax_data.set_xlabel('Frequency (GHz)')
         self.ax_data.set_ylabel('ODMR Signal (a.u.)')
         self.ax_data.legend()
         self.ax_map.set_xlabel('X Position')
         self.ax_map.set_ylabel('Y Position')
+        
         
         # Create sliders for x and y coordinates
         ax_x = plt.axes([0.2, 0.1, 0.6, 0.03])
@@ -310,38 +379,23 @@ class ODMRFitChecker:
             y_data = self.original_data[self.x_idx, self.y_idx]
             self.spectrum_line.set_ydata(y_data)
             
-            # Update fit plot
-            params = self.fitted_params[self.x_idx, self.y_idx]
+            # Update fit plot - use only fitting parameters
+            params = self.fitting_params[self.x_idx, self.y_idx]  # Get only fitting parameters
             fitted_curve = self.double_lorentzian(self.freq_axis, *params)
             self.fit_line.set_ydata(fitted_curve)
             
             # Update pixel marker
             self.pixel_marker.set_data([self.x_idx], [self.y_idx])
             
-            # Update title with comprehensive information
+            # Update title with comprehensive information including quality score
             param_names = ['I0', 'A', 'w', 'fc', 'fd']
             param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
             raw_contrast = np.ptp(y_data)
             fit_contrast = params[1] / params[0] * 100  # A/I0 as percentage
+            quality_score = self.quality_scores[self.x_idx, self.y_idx]  # Get quality score
             param_str += f'\nraw_contrast={raw_contrast:.3f}, fit_contrast={fit_contrast:.1f}%'
+            param_str += f'\nquality_score={quality_score:.3f}'
             self.ax_data.set_title(f'Pixel ({self.x_idx}, {self.y_idx})\n{param_str}')
-            
-            # Update y-axis limits
-            y_margin = (np.max(y_data) - np.min(y_data)) * 0.1
-            self.ax_data.set_ylim(np.min(y_data) - y_margin, 
-                                np.max(y_data) + y_margin)
-            
-            # Update x-axis limits based on view mode
-            if self.full_range:
-                self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
-            else:
-                f_center = params[3]
-                f_delta = params[4]
-                width = params[2]
-                x_margin = max(width * 4, f_delta * 1.5)
-                self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
-            
-            self.fig.canvas.draw_idle()
         
         # Connect callbacks
         self.viz_radio.on_clicked(update_viz)
@@ -444,7 +498,6 @@ class ODMRAnalyzer:
     def double_dip_func_full_log(f, log_I0, log_A, log_width, log_f_center, log_f_delta):
         """
         Double Lorentzian dip function with all parameters in logarithmic space
-        This reflects the physical reality that all parameters must be positive
         """
         # Convert all parameters from log space
         I0 = np.exp(log_I0)
@@ -726,15 +779,7 @@ class ODMRAnalyzer:
     def fit_double_lorentzian(self, method='trf', output_dir=None):
         """
         Parallel version of double Lorentzian fitting
-        
-        Args:
-            method (str): Fitting method ('trf' or 'lm')
-            output_dir (str): Directory to save results
-            
-        Returns:
-            tuple: (output_dir, fitted_params_file) containing the paths to:
-                - The directory where files are stored
-                - The fitted parameters file
+        Now includes quality assessment for each fit
         """
         self.start_profiling()
         
@@ -745,6 +790,7 @@ class ODMRAnalyzer:
             "width": np.zeros((M, N)),
             "f_center": np.zeros((M, N)),
             "f_delta": np.zeros((M, N)),
+            "quality_score": np.zeros((M, N)),  # Added quality score array
         }
         
         default_values = {"I0": 1.0, "A": 0, "width": 1.0, 
@@ -755,11 +801,10 @@ class ODMRAnalyzer:
         num_cores = mp.cpu_count()
         print(f"Using {num_cores} CPU cores")
         
-        # Prepare arguments for parallel processing
+        # Process rows in parallel
         row_args = [(m, self.data, self.freq_axis, default_values, method) 
                    for m in range(M)]
-                
-        # Process rows in parallel
+        
         total_processed = 0
         start_time = time.time()
         
@@ -781,21 +826,32 @@ class ODMRAnalyzer:
                     print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
         
         if output_dir is not None:
-            # Create output directory if it doesn't exist
             os.makedirs(output_dir, exist_ok=True)
             
-            # Generate filenames based on input files
             base_name = os.path.splitext(os.path.basename(self.data_file))[0]
             fitted_params_file = os.path.join(output_dir, f"{base_name}_fitted_params.npy")
-            new_data_file = os.path.join(output_dir, os.path.basename(self.data_file))
-            new_json_file = os.path.join(output_dir, os.path.basename(self.json_file))
+            quality_stats_file = os.path.join(output_dir, f"{base_name}_quality_stats.txt")
             
-            # Save the fitted parameters
-            param_order = ['I0', 'A', 'width', 'f_center', 'f_delta']
+            # Save the fitted parameters including quality scores
+            param_order = ['I0', 'A', 'width', 'f_center', 'f_delta', 'quality_score']
             stacked_params = np.stack([fitted_params[param] for param in param_order], axis=-1)
             np.save(fitted_params_file, stacked_params)
             
-            # Copy the original data files
+            # Calculate and save quality statistics
+            quality_scores = fitted_params['quality_score']
+            success_rate = np.mean(quality_scores >= 0.9) * 100
+            mean_quality = np.mean(quality_scores)
+            median_quality = np.median(quality_scores)
+            
+            with open(quality_stats_file, 'w') as f:
+                f.write(f"Fitting Quality Statistics:\n")
+                f.write(f"Success Rate (score >= 0.9): {success_rate:.1f}%\n")
+                f.write(f"Mean Quality Score: {mean_quality:.3f}\n")
+                f.write(f"Median Quality Score: {median_quality:.3f}\n")
+            
+            # Copy the original files
+            new_data_file = os.path.join(output_dir, os.path.basename(self.data_file))
+            new_json_file = os.path.join(output_dir, os.path.basename(self.json_file))
             import shutil
             shutil.copy2(self.data_file, new_data_file)
             shutil.copy2(self.json_file, new_json_file)
@@ -803,9 +859,9 @@ class ODMRAnalyzer:
             print(f"\nSaved files in: {output_dir}")
             print(f"Saved:")
             print(f"  - Fitted parameters: {os.path.basename(fitted_params_file)}")
+            print(f"  - Quality statistics: {os.path.basename(quality_stats_file)}")
             print(f"  - Original data: {os.path.basename(new_data_file)}")
             print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
-            print(f"Saved array shape: {stacked_params.shape}")
             
             return output_dir, fitted_params_file
         
