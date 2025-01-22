@@ -165,12 +165,37 @@ class ODMRFitChecker:
         # Get data dimensions
         self.M, self.N = self.fitted_params.shape[:2]
         
-        # Calculate raw contrast map once
-        self.raw_contrast = np.ptp(self.original_data, axis=2)
+        # Calculate maps that require original data
+        self.pl_map = np.mean(self.original_data, axis=2)  # Average PL intensity
+        self.raw_contrast = np.ptp(self.original_data, axis=2)  # Max-min difference
         
         # Define visualization options combining parameters and derived quantities
         self.viz_options = {
-            # Original fitting parameters
+            'PL Map': {
+                'data': self.pl_map,
+                'cmap': 'viridis',
+                'label': 'PL Intensity (a.u.)'
+            },
+            'Raw Contrast': {
+                'data': self.raw_contrast,
+                'cmap': 'viridis',
+                'label': 'Raw Contrast (a.u.)'
+            },
+            'Fit Contrast': {
+                'data': self.fitted_params[:, :, 1] / self.fitted_params[:, :, 0] * 100,  # A/I0 as percentage
+                'cmap': 'viridis',
+                'label': 'Fitted Contrast (%)'
+            },
+            'Peak Splitting': {
+                'data': self.fitted_params[:, :, 4],  # f_delta parameter
+                'cmap': 'magma',
+                'label': 'Peak Splitting (GHz)'
+            },
+            'Frequency Shift': {
+                'data': self.fitted_params[:, :, 3],  # f_center parameter
+                'cmap': 'magma',
+                'label': 'Center Frequency (GHz)'
+            },
             'Baseline (I0)': {
                 'data': self.fitted_params[:, :, 0],
                 'cmap': 'viridis',
@@ -185,32 +210,6 @@ class ODMRFitChecker:
                 'data': self.fitted_params[:, :, 2],
                 'cmap': 'plasma',
                 'label': 'Dip Width (GHz)'
-            },
-            'Center Frequency': {
-                'data': self.fitted_params[:, :, 3],
-                'cmap': 'magma',
-                'label': 'Center Frequency (GHz)'
-            },
-            'Frequency Splitting': {
-                'data': self.fitted_params[:, :, 4],
-                'cmap': 'inferno',
-                'label': 'Frequency Splitting (GHz)'
-            },
-            # Additional visualizations
-            'Fitting Contrast': {
-                'data': self.fitted_params[:, :, 1] / self.fitted_params[:, :, 0] * 100,  # A/I0 as percentage
-                'cmap': 'viridis',
-                'label': 'Fitted Contrast (%)'
-            },
-            'Peak Splitting': {
-                'data': self.fitted_params[:, :, 4],  # Same as Frequency Splitting but with different label
-                'cmap': 'magma',
-                'label': 'Peak Splitting (GHz)'
-            },
-            'Raw Contrast': {
-                'data': self.raw_contrast,
-                'cmap': 'viridis',
-                'label': 'Raw Contrast (a.u.)'
             }
         }
         
@@ -231,7 +230,7 @@ class ODMRFitChecker:
         # Initial state
         self.x_idx, self.y_idx = 0, 0
         self.full_range = True
-        self.current_viz = 'Fitting Contrast'  # Default visualization
+        self.current_viz = 'Fit Contrast'  # Default visualization
         
         # Plot initial spectrum
         self.spectrum_line, = self.ax_data.plot(self.freq_axis, 
@@ -980,8 +979,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024-prebonded sample\2D_ODMR_scan_1731977720.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new_processsed\nov-2024-prebonded sample\2D_ODMR_scan_1731977720.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\aug-oct 2024\2D_ODMR_scan_1729993777.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\aug-oct 2024\2D_ODMR_scan_1729993777.json"
 
     # Initialize analyzer at the start
     analyzer = None
@@ -1101,60 +1100,44 @@ def main():
                 traceback.print_exc()
 
         elif choice == '4':
-            print("\nLaunching fit checker...")
-            print("Please specify the directory containing the experiment files.")
-            print("Example format: ./fitted_parameters/experiment_1234567890")
+            print("\nChecking fitted results - please specify the required files:")
+            print("Note: You'll need to provide paths to three files:")
+            print("1. The fitted parameters file (.npy)")
+            print("2. The original data file (.npy)")
+            print("3. The JSON parameters file (.json)")
             
-            experiment_dir = input("\nEnter the experiment directory path: ").strip()
+            # Get file paths from user
+            fitted_params_file = input("\nEnter path to fitted parameters file (.npy): ").strip()
+            data_file = input("Enter path to original data file (.npy): ").strip()
+            json_file = input("Enter path to JSON parameters file (.json): ").strip()
             
-            if not os.path.exists(experiment_dir):
-                print(f"Error: Could not find the directory at: {experiment_dir}")
+            # Verify file existence and extensions
+            files_to_check = [
+                (fitted_params_file, '.npy', "Fitted parameters"),
+                (data_file, '.npy', "Original data"),
+                (json_file, '.json', "JSON parameters")
+            ]
+            
+            files_ok = True
+            for file_path, expected_ext, file_type in files_to_check:
+                if not os.path.exists(file_path):
+                    print(f"\nError: {file_type} file not found at: {file_path}")
+                    files_ok = False
+                elif not file_path.lower().endswith(expected_ext):
+                    print(f"\nWarning: {file_type} file doesn't have expected {expected_ext} extension")
+                    confirm = input("Continue anyway? (y/n): ").lower()
+                    if confirm != 'y':
+                        files_ok = False
+            
+            if not files_ok:
                 continue
-
+            
+            print("\nInitializing fit checker with provided files...")
             try:
-                dir_contents = os.listdir(experiment_dir)
-                fitted_params_file = None
-                data_file = None
-                json_file = None
-                
-                dir_match = re.search(r'experiment_(\d+)$', experiment_dir)
-                if not dir_match:
-                    print("Error: Directory name doesn't match expected format 'experiment_[number]'")
-                    continue
-                    
-                experiment_number = dir_match.group(1)
-                
-                fitted_params_file = os.path.join(experiment_dir, f"lorentzian_params_{experiment_number}.npy")
-                data_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.npy")
-                json_file = os.path.join(experiment_dir, f"2D_ODMR_scan_{experiment_number}.json")
-                
-                missing_files = []
-                if not os.path.exists(fitted_params_file):
-                    missing_files.append("Fitted parameters file")
-                if not os.path.exists(data_file):
-                    missing_files.append("Original data file")
-                if not os.path.exists(json_file):
-                    missing_files.append("JSON parameters file")
-                    
-                if missing_files:
-                    print("\nError: Some required files are missing:")
-                    for missing in missing_files:
-                        print(f"  - {missing}")
-                    continue
-
-                print("\nInitializing fit checker with:")
-                print(f"Experiment directory: {experiment_dir}")
-                print(f"Experiment number: {experiment_number}")
-                print(f"Found all required files:")
-                print(f"  - Fitted parameters: {os.path.basename(fitted_params_file)}")
-                print(f"  - Original data: {os.path.basename(data_file)}")
-                print(f"  - JSON parameters: {os.path.basename(json_file)}")
-                
                 checker = ODMRFitChecker(fitted_params_file, data_file, json_file)
                 checker.create_interactive_viewer()
-                
             except Exception as e:
-                print(f"Error launching fit checker: {str(e)}")
+                print(f"\nError launching fit checker: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
