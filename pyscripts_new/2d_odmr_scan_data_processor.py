@@ -282,28 +282,37 @@ class ODMRFitChecker:
     
     def create_interactive_viewer(self):
         """Create interactive viewer with quality assessment display"""
-        # Set up the figure
+        # Set up the figure with adjusted spacing
         self.fig = plt.figure(figsize=(16, 8))
+        
+        # Increase left margin to make room for radio buttons
+        plt.subplots_adjust(bottom=0.25, left=0.2)  # Increased left margin
+        
         gs = self.fig.add_gridspec(1, 2, width_ratios=[1, 1])
         self.ax_data = self.fig.add_subplot(gs[0])
         self.ax_map = self.fig.add_subplot(gs[1])
-        plt.subplots_adjust(bottom=0.25, left=0.15)
         
         # Initial state
         self.x_idx, self.y_idx = 0, 0
         self.full_range = True
-        self.current_viz = 'Fit Quality'  # Start with quality visualization
+        self.current_viz = 'Fit Quality'
+        self.local_scaling = True  # Add this line for scaling state
         
-        # Plot initial spectrum
-        self.spectrum_line, = self.ax_data.plot(self.freq_axis, 
-                                              self.original_data[self.x_idx, self.y_idx], 
-                                              'b.', label='Data')
+        # Get initial data range for consistent y-axis limits
+        y_data = self.original_data[self.x_idx, self.y_idx]
+        self.y_min = np.min(self.original_data)
+        self.y_max = np.max(self.original_data)
+        y_range = self.y_max - self.y_min
+        self.y_margin = y_range * 0.3
+                
+        # Plot initial spectrum with fixed y-axis limits
+        self.spectrum_line, = self.ax_data.plot(self.freq_axis, y_data, 'b.', label='Data')
+        self.ax_data.set_ylim(self.y_min - self.y_margin, self.y_max + self.y_margin)
         
         # Calculate and plot initial fit
-        params = self.fitted_params[self.x_idx, self.y_idx, :5]  # Exclude quality score
+        params = self.fitting_params[self.x_idx, self.y_idx]
         fitted_curve = self.double_lorentzian(self.freq_axis, *params)
-        self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', 
-                                          label='Fit')
+        self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', label='Fit')
         
         # Set initial x-axis limits
         self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
@@ -311,12 +320,19 @@ class ODMRFitChecker:
         # Create initial parameter map
         viz_data = self.viz_options[self.current_viz]['data']
         self.map_img = self.ax_map.imshow(viz_data.T, origin='lower', 
-                                         cmap=self.viz_options[self.current_viz]['cmap'])
+                                        cmap=self.viz_options[self.current_viz]['cmap'])
         self.pixel_marker, = self.ax_map.plot(self.x_idx, self.y_idx, 'rx')
         
         # Add colorbar
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
         self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
+        
+        # Set up axis labels and titles
+        self.ax_data.set_xlabel('Frequency (GHz)')
+        self.ax_data.set_ylabel('ODMR Signal (a.u.)')
+        self.ax_data.legend()
+        self.ax_map.set_xlabel('X Position')
+        self.ax_map.set_ylabel('Y Position')
         
         # Add overall statistics to title
         self.ax_map.set_title(
@@ -324,14 +340,21 @@ class ODMRFitChecker:
             f'Mean Quality: {self.mean_quality:.3f}'
         )
         
-        # Set up axis labels
-        self.ax_data.set_xlabel('Frequency (GHz)')
-        self.ax_data.set_ylabel('ODMR Signal (a.u.)')
-        self.ax_data.legend()
-        self.ax_map.set_xlabel('X Position')
-        self.ax_map.set_ylabel('Y Position')
+        # Keep track of scaling mode
+        self.local_scaling = True  # Start with local scaling by default
         
+        # Add button for toggling x-axis range and y-axis scaling
+        ax_range_button = plt.axes([0.85, 0.15, 0.1, 0.04])  # X-axis range toggle
+        ax_scale_button = plt.axes([0.85, 0.08, 0.1, 0.04])  # Y-axis scaling toggle
+        self.range_button = Button(ax_range_button, 'Toggle Range')
+        self.scale_button = Button(ax_scale_button, 'Toggle Scale')
         
+        # Calculate global data range once
+        self.global_y_min = np.min(self.original_data)
+        self.global_y_max = np.max(self.original_data)
+        self.global_y_range = self.global_y_max - self.global_y_min
+        self.y_margin_factor = 0.05  # 5% margin
+
         # Create sliders for x and y coordinates
         ax_x = plt.axes([0.2, 0.1, 0.6, 0.03])
         ax_y = plt.axes([0.2, 0.05, 0.6, 0.03])
@@ -343,13 +366,14 @@ class ODMRFitChecker:
         ax_button = plt.axes([0.85, 0.15, 0.1, 0.04])
         self.range_button = Button(ax_button, 'Toggle Range')
         
-        # Add radio buttons for visualization selection with more space
-        ax_radio = plt.axes([0.02, 0.25, 0.12, 0.6])  # Taller radio button area
+        # Move radio buttons further left and make them smaller
+        ax_radio = plt.axes([0.02, 0.25, 0.1, 0.6])  # Adjusted position
         self.viz_radio = RadioButtons(ax_radio, list(self.viz_options.keys()), 
                                     active=list(self.viz_options.keys()).index(self.current_viz))
-        # Adjust radio button labels for better readability
+        
+        # Make radio button labels smaller and adjust their position
         for label in self.viz_radio.labels:
-            label.set_fontsize(8)
+            label.set_fontsize(7)  # Smaller font
         
         # Define update functions
         def update_viz(label):
@@ -371,6 +395,14 @@ class ODMRFitChecker:
             self.full_range = not self.full_range
             update(None)
         
+        def toggle_scaling(event):  # Add this new function
+            self.local_scaling = not self.local_scaling
+            if self.local_scaling:
+                print("Using local y-axis scaling")
+            else:
+                print("Using global y-axis scaling")
+            update(None)
+
         def update(val):
             self.x_idx = int(self.x_slider.val)
             self.y_idx = int(self.y_slider.val)
@@ -379,33 +411,69 @@ class ODMRFitChecker:
             y_data = self.original_data[self.x_idx, self.y_idx]
             self.spectrum_line.set_ydata(y_data)
             
-            # Update fit plot - use only fitting parameters
-            params = self.fitting_params[self.x_idx, self.y_idx]  # Get only fitting parameters
+            # Update fit plot
+            params = self.fitting_params[self.x_idx, self.y_idx]
             fitted_curve = self.double_lorentzian(self.freq_axis, *params)
             self.fit_line.set_ydata(fitted_curve)
             
             # Update pixel marker
             self.pixel_marker.set_data([self.x_idx], [self.y_idx])
             
-            # Update title with comprehensive information including quality score
+            # Update title with info
             param_names = ['I0', 'A', 'w', 'fc', 'fd']
             param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
             raw_contrast = np.ptp(y_data)
-            fit_contrast = params[1] / params[0] * 100  # A/I0 as percentage
-            quality_score = self.quality_scores[self.x_idx, self.y_idx]  # Get quality score
+            fit_contrast = params[1] / params[0] * 100
+            quality_score = self.quality_scores[self.x_idx, self.y_idx]
             param_str += f'\nraw_contrast={raw_contrast:.3f}, fit_contrast={fit_contrast:.1f}%'
             param_str += f'\nquality_score={quality_score:.3f}'
             self.ax_data.set_title(f'Pixel ({self.x_idx}, {self.y_idx})\n{param_str}')
-        
+            
+            # Calculate local values first, as we need them in both cases
+            local_min = min(np.min(y_data), np.min(fitted_curve))
+            local_max = max(np.max(y_data), np.max(fitted_curve))
+            local_range = local_max - local_min
+            y_center = (local_max + local_min) / 2
+            
+            # Y-axis limits calculation based on scaling mode
+            if self.local_scaling:
+                # Use local min/max for current pixel
+                y_margin = local_range * self.y_margin_factor
+                self.ax_data.set_ylim(
+                    y_center - local_range/2 - y_margin,
+                    y_center + local_range/2 + y_margin
+                )
+            else:
+                # Use global min/max across all pixels
+                y_margin = self.global_y_range * self.y_margin_factor
+                self.ax_data.set_ylim(
+                    self.global_y_min - y_margin,
+                    self.global_y_max + y_margin
+                )
+            
+            # Update x-axis limits based on view mode
+            if self.full_range:
+                self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
+            else:
+                f_center = params[3]
+                f_delta = params[4]
+                width = params[2]
+                x_margin = max(width * 4, f_delta * 1.5)
+                self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
+            
+            self.fig.canvas.draw_idle()
+
         # Connect callbacks
         self.viz_radio.on_clicked(update_viz)
         self.range_button.on_clicked(toggle_range)
+        self.scale_button.on_clicked(toggle_scaling)  # Add this line
         self.x_slider.on_changed(update)
         self.y_slider.on_changed(update)
         
         # Initialize plot
         update(None)
         
+        # Show the plot
         plt.show()
 
 class ODMRAnalyzer:
@@ -1035,8 +1103,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\aug-oct 2024\2D_ODMR_scan_1729993777.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\aug-oct 2024\2D_ODMR_scan_1729993777.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.json"
 
     # Initialize analyzer at the start
     analyzer = None
