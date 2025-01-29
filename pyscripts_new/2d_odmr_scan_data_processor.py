@@ -224,6 +224,13 @@ class ODMRFitChecker:
         # First 5 columns are fitting parameters, last column is quality score
         self.fitting_params = self.fitted_params[:, :, :5]  # Extract only fitting parameters
         self.quality_scores = self.fitted_params[:, :, -1]  # Extract quality scores
+
+        # Add new parameters for neighborhood averaging
+        self.enable_averaging = False  # Toggle for neighborhood averaging
+        self.quality_threshold = 0.80  # Quality score threshold
+        
+        # Create cached averaged data dictionary
+        self.averaged_data = {}
         
         # Define visualization options
         self.viz_options = {
@@ -274,12 +281,74 @@ class ODMRFitChecker:
             }
         }
 
-        
     def double_lorentzian(self, f, I0, A, width, f_center, f_delta):
         """Calculate double Lorentzian function with given parameters."""
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - \
                A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
+    def calculate_neighborhood_average(self, data, x, y):
+        """
+        Calculate the average of the 8 surrounding pixels.
+        
+        Args:
+            data (np.ndarray): 2D array of data
+            x (int): x coordinate of center pixel
+            y (int): y coordinate of center pixel
+            
+        Returns:
+            float: Average value of surrounding pixels
+        """
+        M, N = data.shape
+        values = []
+        
+        # Define the neighborhood coordinates
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                # Skip the center pixel
+                if dx == 0 and dy == 0:
+                    continue
+                    
+                # Check boundaries
+                new_x, new_y = x + dx, y + dy
+                if 0 <= new_x < M and 0 <= new_y < N:
+                    values.append(data[new_x, new_y])
+                    
+        return np.mean(values) if values else data[x, y]
+
+    def get_averaged_data(self, data_key):
+        """
+        Get data with neighborhood averaging applied to low-quality pixels.
+        
+        Args:
+            data_key (str): Key identifying which data to process
+            
+        Returns:
+            np.ndarray: Processed data with averaging applied
+        """
+        # Check if we already calculated this
+        if not self.enable_averaging:
+            return self.viz_options[data_key]['data']
+            
+        if data_key in self.averaged_data:
+            return self.averaged_data[data_key]
+            
+        # Get original data
+        original_data = self.viz_options[data_key]['data']
+        averaged_data = original_data.copy()
+        
+        # Apply averaging to low-quality pixels
+        M, N = original_data.shape
+        for x in range(M):
+            for y in range(N):
+                if self.quality_scores[x, y] < self.quality_threshold:
+                    averaged_data[x, y] = self.calculate_neighborhood_average(
+                        original_data, x, y
+                    )
+                    
+        # Cache the result
+        self.averaged_data[data_key] = averaged_data
+        return averaged_data
+
     def create_interactive_viewer(self):
         """Create interactive viewer with quality assessment display"""
         # Set up the figure with adjusted spacing
@@ -374,11 +443,80 @@ class ODMRFitChecker:
         # Make radio button labels smaller and adjust their position
         for label in self.viz_radio.labels:
             label.set_fontsize(7)  # Smaller font
+
+
+        # Add toggle button for neighborhood averaging
+        ax_avg_button = plt.axes([0.85, 0.22, 0.1, 0.04])
+        self.avg_button = Button(ax_avg_button, 'Toggle Averaging')
+
+        ax_threshold = plt.axes([0.2, 0.15, 0.6, 0.03])
+        self.threshold_slider = Slider(
+            ax_threshold, 'Quality Threshold', 
+            0.0, 1.0, valinit=self.quality_threshold,
+            valstep=0.001  # Changed from 0.01 to 0.001 for even finer control
+        )
         
-        # Define update functions
+        def update_pixel_marker():
+            """Helper function to update pixel marker position"""
+            self.pixel_marker.set_data([self.x_idx], [self.y_idx])
+
+        def toggle_averaging(event):
+            """Toggle neighborhood averaging"""
+            self.enable_averaging = not self.enable_averaging
+            
+            # Clear cached averages
+            self.averaged_data.clear()
+            
+            # Update the current visualization
+            viz_data = self.get_averaged_data(self.current_viz)
+            self.map_img.set_data(viz_data.T)
+            
+            # Update colorbar limits for new data
+            vmin = np.min(viz_data)
+            vmax = np.max(viz_data)
+            self.map_img.set_clim(vmin, vmax)
+            
+            # Update pixel marker position
+            update_pixel_marker()
+            
+            # Force a redraw
+            self.fig.canvas.draw_idle()
+            print(f"Neighborhood averaging: {'enabled' if self.enable_averaging else 'disabled'}")
+            
+            # Update the pixel display
+            update(None)
+            
+        def update_threshold(val):
+            """Update quality threshold"""
+            self.quality_threshold = val
+            # Clear cached averages
+            self.averaged_data.clear()
+            
+            if self.enable_averaging:
+                # Update visualization with new threshold
+                viz_data = self.get_averaged_data(self.current_viz)
+                self.map_img.set_data(viz_data.T)
+                
+                # Update colorbar limits
+                vmin = np.min(viz_data)
+                vmax = np.max(viz_data)
+                self.map_img.set_clim(vmin, vmax)
+                
+                # Update pixel marker position
+                update_pixel_marker()
+                
+                # Force a redraw
+                self.fig.canvas.draw_idle()
+                
+            # Update the pixel display
+            update(None)
+                
         def update_viz(label):
+            """Update visualization with averaging support"""
             self.current_viz = label
-            viz_data = self.viz_options[label]['data']
+            
+            # Get data with averaging if enabled
+            viz_data = self.get_averaged_data(label)
             
             # Update colormap
             self.map_img.set_data(viz_data.T)
@@ -387,10 +525,17 @@ class ODMRFitChecker:
             # Update colorbar label
             self.colorbar.set_label(self.viz_options[label]['label'])
             
-            # Update colorbar limits
-            self.map_img.autoscale()
+            # Update colorbar limits and scale
+            vmin = np.min(viz_data)
+            vmax = np.max(viz_data)
+            self.map_img.set_clim(vmin, vmax)
+            
+            # Update pixel marker position
+            update_pixel_marker()
+            
+            # Force a redraw
             self.fig.canvas.draw_idle()
-        
+
         def toggle_range(event):
             self.full_range = not self.full_range
             update(None)
@@ -404,6 +549,7 @@ class ODMRFitChecker:
             update(None)
 
         def update(val):
+            """Update display with averaging support"""
             self.x_idx = int(self.x_slider.val)
             self.y_idx = int(self.y_slider.val)
             
@@ -411,25 +557,40 @@ class ODMRFitChecker:
             y_data = self.original_data[self.x_idx, self.y_idx]
             self.spectrum_line.set_ydata(y_data)
             
-            # Update fit plot
+            # Calculate the fitted curve
             params = self.fitting_params[self.x_idx, self.y_idx]
             fitted_curve = self.double_lorentzian(self.freq_axis, *params)
             self.fit_line.set_ydata(fitted_curve)
             
-            # Update pixel marker
-            self.pixel_marker.set_data([self.x_idx], [self.y_idx])
+            # Get current visualization data with averaging
+            viz_data = self.get_averaged_data(self.current_viz)
+            self.map_img.set_data(viz_data.T)
             
-            # Update title with info
-            param_names = ['I0', 'A', 'w', 'fc', 'fd']
-            param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
-            raw_contrast = np.ptp(y_data)
-            fit_contrast = params[1] / params[0] * 100
+            # Update pixel marker position
+            update_pixel_marker()  # Add this line here
+            
+            # Update parameter display
+            if self.quality_scores[self.x_idx, self.y_idx] < self.quality_threshold and self.enable_averaging:
+                param_str = "Using neighborhood average (low quality fit)"
+                # Get averaged parameters for display
+                for i, param_name in enumerate(['I0', 'A', 'w', 'fc', 'fd']):
+                    averaged_val = self.calculate_neighborhood_average(
+                        self.fitting_params[:, :, i], 
+                        self.x_idx, 
+                        self.y_idx
+                    )
+                    param_str += f'\n{param_name}={averaged_val:.3f}'
+            else:
+                param_names = ['I0', 'A', 'w', 'fc', 'fd']
+                param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
+            
             quality_score = self.quality_scores[self.x_idx, self.y_idx]
-            param_str += f'\nraw_contrast={raw_contrast:.3f}, fit_contrast={fit_contrast:.1f}%'
             param_str += f'\nquality_score={quality_score:.3f}'
+            
+            # Update title and display
             self.ax_data.set_title(f'Pixel ({self.x_idx}, {self.y_idx})\n{param_str}')
             
-            # Calculate local values first, as we need them in both cases
+            # Calculate local values for y-axis scaling
             local_min = min(np.min(y_data), np.min(fitted_curve))
             local_max = max(np.max(y_data), np.max(fitted_curve))
             local_range = local_max - local_min
@@ -461,12 +622,15 @@ class ODMRFitChecker:
                 x_margin = max(width * 4, f_delta * 1.5)
                 self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
             
+            # Force a redraw
             self.fig.canvas.draw_idle()
 
         # Connect callbacks
         self.viz_radio.on_clicked(update_viz)
+        self.avg_button.on_clicked(toggle_averaging)
+        self.threshold_slider.on_changed(update_threshold)
         self.range_button.on_clicked(toggle_range)
-        self.scale_button.on_clicked(toggle_scaling)  # Add this line
+        self.scale_button.on_clicked(toggle_scaling)  
         self.x_slider.on_changed(update)
         self.y_slider.on_changed(update)
         
@@ -1103,8 +1267,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024 bonded sample\2D_ODMR_scan_1731601991.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024 bonded sample\2D_ODMR_scan_1731601991.json"
 
     # Initialize analyzer at the start
     analyzer = None
