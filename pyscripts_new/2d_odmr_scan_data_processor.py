@@ -15,6 +15,23 @@ from functools import partial
 from pathlib import Path
 import re
 from matplotlib.widgets import Slider, Button, RadioButtons
+'''
+
+Statistics of data provided by Dylan, this data is concerns 20x20x100 2D ODMR scan data
+
+Parameter statistics:
+                 I0              A         width      f_center       f_delta
+count  2.560000e+04   25600.000000  25600.000000  25600.000000  2.560000e+04
+mean   4.608335e+05   28471.238802      0.006178      2.871805  3.546591e-02
+std    4.529519e+05   25914.354677      0.004521      0.008753  1.671464e-02
+min    6.029727e+04      93.602962      0.000064      2.820555  3.344105e-09
+25%    1.525285e+05    7803.165582      0.004589      2.869750  3.079085e-02
+50%    2.024858e+05   23177.294963      0.005706      2.870441  3.653382e-02
+75%    8.490758e+05   36695.043713      0.006545      2.878413  4.990010e-02
+max    1.442024e+06  250318.277408      0.140000      2.940000  1.344750e-01
+
+
+'''
 
 
 def organize_experiment_files(experiment_number, original_data_file, original_json_file, fitted_params_file, base_output_dir):
@@ -739,6 +756,22 @@ class ODMRAnalyzer:
         f_delta = np.exp(log_f_delta)
         
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
+    
+    #hybrid version for log scaling, f_center and f_delta are linear because the range allows it
+    @staticmethod
+    def double_dip_func_hybrid(f, log_I0, log_A, log_width, f_center, f_delta):
+        """
+        Double Lorentzian dip function with hybrid parameter space.
+        I0, A, and width are in log space, while f_center and f_delta are linear.
+        """
+        # Convert amplitude parameters from log space
+        I0 = np.exp(log_I0)
+        A = np.exp(log_A)
+        width = np.exp(log_width)
+        
+        # Calculate double dip
+        return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - \
+            A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
 
 
     @staticmethod
@@ -784,209 +817,175 @@ class ODMRAnalyzer:
 
     @staticmethod
     def estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips):
-        """Helper method that makes smarter initial parameter estimates"""
-        freq_range = freq_axis[-1] - freq_axis[0]
+        """Improved initial parameter estimation with physical constraints"""
+        # Physics-based constraints for NV centers
+        TYPICAL_WIDTH = 0.006  # 6 MHz typical linewidth
+        MIN_SPLITTING = 0.010  # 10 MHz minimum detectable splitting
+        MAX_SPLITTING = 0.150  # 150 MHz maximum expected splitting
         
-        # Estimate baseline from highest points
-        sorted_data = np.sort(pixel_data_norm)
-        I0_est = np.mean(sorted_data[-int(len(sorted_data)*0.1):])
+        # Calculate frequency range and mean for bounds
+        freq_range = freq_axis[-1] - freq_axis[0]
+        mean_freq = np.mean(freq_axis)
+        
+        # Baseline estimation using 95th percentile
+        I0_est = np.percentile(pixel_data_norm, 95)
+        
+        # Apply Savitzky-Golay filter for smoother analysis
+        window_length = min(11, len(pixel_data_norm)//2*2+1)
+        smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
         
         if len(dips) >= 2:
-            # We found two dips - use their properties
-            f_dip_1 = freq_axis[dips[0]]
-            f_dip_2 = freq_axis[dips[1]]
+            # Sort dips by depth
+            dip_depths = I0_est - smoothed_data[dips]
+            sorted_indices = np.argsort(dip_depths)[::-1]
+            main_dips = dips[sorted_indices[:2]]
             
-            f_center_est = np.mean([f_dip_1, f_dip_2])
-            f_delta_est = abs(f_dip_2 - f_dip_1)
+            # Calculate center frequency and splitting
+            f_dip_1, f_dip_2 = sorted([freq_axis[d] for d in main_dips])
+            f_center_est = (f_dip_1 + f_dip_2) / 2
+            f_delta_est = f_dip_2 - f_dip_1
             
-            # Estimate width from dip shapes
-            dip_depth = np.mean([I0_est - pixel_data_norm[dip] for dip in dips[:2]])
-            half_max_level = I0_est - dip_depth/2
+            # Estimate width using FWHM
+            dip_depths = [I0_est - smoothed_data[d] for d in main_dips]
+            half_max_levels = [I0_est - depth/2 for depth in dip_depths]
             
-            # Find typical width at half maximum
             widths = []
-            for dip in dips[:2]:
-                left_idx = dip
-                while left_idx > 0 and pixel_data_norm[left_idx] < half_max_level:
+            for dip_idx, half_max in zip(main_dips, half_max_levels):
+                left_idx = dip_idx
+                while left_idx > 0 and smoothed_data[left_idx] < half_max:
                     left_idx -= 1
-                
-                right_idx = dip
-                while right_idx < len(pixel_data_norm)-1 and pixel_data_norm[right_idx] < half_max_level:
+                right_idx = dip_idx
+                while right_idx < len(freq_axis)-1 and smoothed_data[right_idx] < half_max:
                     right_idx += 1
-                
-                widths.append(freq_axis[right_idx] - freq_axis[left_idx])
+                    
+                width = freq_axis[right_idx] - freq_axis[left_idx]
+                widths.append(width)
             
             width_est = np.mean(widths) * 0.5  # Convert FWHM to Lorentzian width
-            A_est = dip_depth
+            A_est = np.mean(dip_depths)
             
         elif len(dips) == 1:
-            # Single dip - check if it might be merged
+            # Single dip case
             dip_idx = dips[0]
-            f_dip = freq_axis[dip_idx]
+            f_center_est = freq_axis[dip_idx]
             
-            # Measure the dip width
-            dip_depth = I0_est - pixel_data_norm[dip_idx]
-            half_max_level = I0_est - dip_depth/2
+            # Measure FWHM for the single dip
+            dip_depth = I0_est - smoothed_data[dip_idx]
+            half_max = I0_est - dip_depth/2
             
             left_idx = dip_idx
-            while left_idx > 0 and pixel_data_norm[left_idx] < half_max_level:
+            while left_idx > 0 and smoothed_data[left_idx] < half_max:
                 left_idx -= 1
-            
             right_idx = dip_idx
-            while right_idx < len(pixel_data_norm)-1 and pixel_data_norm[right_idx] < half_max_level:
+            while right_idx < len(freq_axis)-1 and smoothed_data[right_idx] < half_max:
                 right_idx += 1
-            
+                
             measured_width = freq_axis[right_idx] - freq_axis[left_idx]
             
-            if measured_width > freq_range * 0.1:
-                # Probably merged dips
-                width_est = measured_width * 0.25
-                f_center_est = f_dip
-                f_delta_est = width_est * 2
+            # Check if this might be a merged peak
+            if measured_width > TYPICAL_WIDTH * 3:
+                width_est = TYPICAL_WIDTH
+                f_delta_est = measured_width * 0.6
             else:
-                # Probably single dip
                 width_est = measured_width * 0.5
-                f_center_est = f_dip
-                f_delta_est = freq_range * 0.05
-            
+                f_delta_est = MIN_SPLITTING
+                
             A_est = dip_depth
             
         else:
-            # No clear dips - use conservative estimates
-            width_est = freq_range * 0.1
-            f_center_est = np.mean(freq_axis)
-            f_delta_est = freq_range * 0.2
-            A_est = np.ptp(pixel_data_norm) * 0.3
+            # No dips found - use default values
+            f_center_est = 2.87  # Zero-field splitting
+            f_delta_est = MIN_SPLITTING
+            width_est = TYPICAL_WIDTH
+            A_est = 0.1 * np.ptp(pixel_data_norm)
+
+        # Apply physical constraints
+        width_est = np.clip(width_est, TYPICAL_WIDTH*0.5, TYPICAL_WIDTH*2)
+        f_delta_est = np.clip(f_delta_est, MIN_SPLITTING, MAX_SPLITTING)
+        f_center_est = np.clip(f_center_est, mean_freq - 0.1, mean_freq + 0.1)
         
         return I0_est, A_est, width_est, f_center_est, f_delta_est
 
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
-        Fit single pixel data using full logarithmic scale optimization
-        Now treating all parameters in log space to respect their physical positivity
+        Fit single pixel data using hybrid logarithmic scale optimization
         """
         # Normalize data for numerical stability
         scale_factor = np.max(np.abs(pixel_data))
+        if scale_factor == 0:
+            scale_factor = 1
         pixel_data_norm = pixel_data / scale_factor
         
-        # Small constant to avoid log(0)
-        epsilon = 1e-10
-        
-        # Initial parameter estimation
-        edge_points = np.concatenate([pixel_data_norm[:5], pixel_data_norm[-5:]])
-        I0_est = np.mean(edge_points)
-        A_est = np.ptp(pixel_data_norm) * 0.5
-        freq_range = freq_axis[-1] - freq_axis[0]
-        
         # Find dips for initial estimates
-        inverted = -pixel_data_norm
-        peaks, _ = find_peaks(inverted, prominence=0.01)
-        
-        # # Initial parameter estimates with physical consideration
-        # if len(peaks) == 0:
-        #     width_est = freq_range * 0.1
-        #     f_center_est = np.mean(freq_axis)
-        #     f_delta_est = freq_range * 0.2
-        # elif len(peaks) == 1:
-        #     f_dip = freq_axis[peaks[0]]
-        #     width_est = freq_range * 0.05
-        #     f_center_est = f_dip
-        #     f_delta_est = freq_range * 0.1
-        # else:
-        #     peak_depths = inverted[peaks]
-        #     two_deepest = peaks[np.argsort(peak_depths)[-2:]]
-        #     f_dip_1 = freq_axis[two_deepest[0]]
-        #     f_dip_2 = freq_axis[two_deepest[1]]
-        #     width_est = abs(f_dip_2 - f_dip_1) * 0.3
-        #     f_center_est = np.mean([f_dip_1, f_dip_2])
-        #     f_delta_est = abs(f_dip_2 - f_dip_1)
-        
-        # Find dips using robust method
         dips = ODMRAnalyzer.find_dips_robustly(freq_axis, pixel_data_norm)
         
         # Get parameter estimates
         I0_est, A_est, width_est, f_center_est, f_delta_est = \
             ODMRAnalyzer.estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips)
         
-        # Convert to log space (keep your existing log conversion code)
+        # Convert amplitude parameters to log space
+        epsilon = 1e-10
         log_I0_est = np.log(max(I0_est, epsilon))
         log_A_est = np.log(max(A_est, epsilon))
         log_width_est = np.log(max(width_est, epsilon))
-        log_f_center_est = np.log(max(f_center_est, epsilon))
-        log_f_delta_est = np.log(max(f_delta_est, epsilon))
         
-        # Initial parameter vector (all in log space)
-        p0 = [log_I0_est, log_A_est, log_width_est, log_f_center_est, log_f_delta_est]
+        # Initial parameter vector
+        p0 = [log_I0_est, log_A_est, log_width_est, f_center_est, f_delta_est]
         
         # Set bounds for TRF method
         if method == 'trf':
-            # All bounds in log space
-            bounds = ([
-                np.log(epsilon),          # log_I0 lower
-                np.log(epsilon),          # log_A lower
-                np.log(freq_range*1e-4),  # log_width lower
-                np.log(freq_axis[0]),     # log_f_center lower
-                np.log(epsilon)           # log_f_delta lower
-            ], [
-                np.log(1e2),             # log_I0 upper
-                np.log(1e2),             # log_A upper
-                np.log(freq_range),      # log_width upper
-                np.log(freq_axis[-1]),   # log_f_center upper
-                np.log(freq_range)       # log_f_delta upper
-            ])
+            # Define bounds in hybrid space
+            bounds = (
+                # Lower bounds: [log_I0, log_A, log_width, f_center, f_delta]
+                [np.log(0.1), np.log(1e-3), np.log(0.001), 2.82, 0.01],
+                # Upper bounds
+                [np.log(10.0), np.log(1.0), np.log(0.1), 2.94, 0.14]
+            )
+            
+            # Ensure initial parameters are within bounds
+            for i, (param, (lower, upper)) in enumerate(zip(p0, zip(*bounds))):
+                p0[i] = np.clip(param, lower, upper)
         else:
             bounds = (-np.inf, np.inf)
         
         try:
-            # Fit using curve_fit with all logarithmic parameters
-            if method == 'trf':
-                popt, pcov = curve_fit(
-                    ODMRAnalyzer.double_dip_func_full_log,
-                    freq_axis,
-                    pixel_data_norm,
-                    p0=p0,
-                    bounds=bounds,
-                    method='trf',
-                    maxfev=3000,
-                    ftol=1e-4,
-                    xtol=1e-4
-                )
-            else:
-                popt, pcov = curve_fit(
-                    ODMRAnalyzer.double_dip_func_full_log,
-                    freq_axis,
-                    pixel_data_norm,
-                    p0=p0,
-                    method='lm',
-                    maxfev=3000
-                )
+            # Fit using curve_fit
+            popt, pcov = curve_fit(
+                ODMRAnalyzer.double_dip_func_hybrid,
+                freq_axis,
+                pixel_data_norm,
+                p0=p0,
+                bounds=bounds if method == 'trf' else (-np.inf, np.inf),
+                method=method,
+                maxfev=3000,
+                ftol=1e-4,
+                xtol=1e-4
+            )
             
-            # Convert all parameters back to linear space and original scale
+            # Convert parameters back to linear space and original scale
             I0 = np.exp(popt[0]) * scale_factor
             A = np.exp(popt[1]) * scale_factor
             width = np.exp(popt[2])
-            f_center = np.exp(popt[3])
-            f_delta = np.exp(popt[4])
+            f_center = popt[3]
+            f_delta = popt[4]
             
             # Calculate fit quality
-            fitted_curve = ODMRAnalyzer.double_dip_func_full_log(freq_axis, *popt)
-            log_data = np.log(pixel_data_norm + epsilon)
-            log_fitted = np.log(fitted_curve + epsilon)
-            mse_log = np.mean((log_data - log_fitted)**2)
+            fitted_curve = ODMRAnalyzer.double_dip_func_hybrid(freq_axis, *popt)
+            quality_score = calculate_fit_quality(pixel_data_norm, fitted_curve)
             
-            # Return default values if fit is poor
-            if mse_log > 1.0:
+            # Return default values if fit quality is poor
+            if quality_score < 0.5:
                 if default_values is None:
                     default_values = {
                         "I0": np.mean(pixel_data),
                         "A": np.ptp(pixel_data) * 0.1,
-                        "width": freq_range * 0.1,
+                        "width": (freq_axis[-1] - freq_axis[0]) * 0.1,
                         "f_center": np.mean(freq_axis),
-                        "f_delta": freq_range * 0.2
+                        "f_delta": (freq_axis[-1] - freq_axis[0]) * 0.2
                     }
                 return default_values
-                
+            
             return {
                 "I0": I0,
                 "A": A,
@@ -1001,11 +1000,12 @@ class ODMRAnalyzer:
                 default_values = {
                     "I0": np.mean(pixel_data),
                     "A": np.ptp(pixel_data) * 0.1,
-                    "width": freq_range * 0.1,
+                    "width": (freq_axis[-1] - freq_axis[0]) * 0.1,
                     "f_center": np.mean(freq_axis),
-                    "f_delta": freq_range * 0.2
+                    "f_delta": (freq_axis[-1] - freq_axis[0]) * 0.2
                 }
             return default_values
+                
 
     @timing_decorator    
     def fit_double_lorentzian(self, method='trf', output_dir=None):
@@ -1267,8 +1267,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024 bonded sample\2D_ODMR_scan_1731601991.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024 bonded sample\2D_ODMR_scan_1731601991.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730338486.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730338486.json"
 
     # Initialize analyzer at the start
     analyzer = None
