@@ -775,131 +775,79 @@ class ODMRAnalyzer:
 
 
     @staticmethod
-    def find_dips_robustly(freq_axis, pixel_data_norm):
-        """Helper method that looks for dips using multiple approaches"""
+    def find_outer_dips(freq_axis, pixel_data_norm):
+        """Find the outermost dips in a spectrum that may contain multiple dip pairs"""
         inverted = -pixel_data_norm
-        dips = []
         
-        # Try different prominence levels - start strict, then get more lenient
+        # Try different prominence levels to find dips
         prominence_levels = [0.01, 0.005, 0.002]
+        all_peaks = []
+        
         for prominence in prominence_levels:
             peaks, properties = find_peaks(inverted, prominence=prominence, 
-                                        width=2,  # Minimum width requirement
-                                        distance=3)  # Minimum separation
+                                        width=2, distance=3)
             if len(peaks) >= 2:
-                # Sort by prominence and take top two
+                # Sort peaks by prominence
                 peak_prominences = properties['prominences']
-                sorted_indices = np.argsort(peak_prominences)[::-1]
-                peaks = peaks[sorted_indices]
-                dips = peaks[:2]
-                break
-            elif len(peaks) == 1 and len(dips) == 0:
-                dips = [peaks[0]]
-        
-        # If we still haven't found two dips, try with smoothed data
-        if len(dips) < 2:
-            smoothed = savgol_filter(pixel_data_norm, window_length=7, polyorder=3)
-            inverted_smooth = -smoothed
-            
-            for prominence in prominence_levels:
-                peaks, properties = find_peaks(inverted_smooth, prominence=prominence,
-                                            width=2, distance=3)
-                if len(peaks) >= 2:
-                    peak_prominences = properties['prominences']
-                    sorted_indices = np.argsort(peak_prominences)[::-1]
-                    peaks = peaks[sorted_indices]
-                    dips = peaks[:2]
-                    break
-                elif len(peaks) == 1 and len(dips) == 0:
-                    dips = [peaks[0]]
-        
-        return np.array(dips)
+                peak_positions = freq_axis[peaks]
+                
+                # Filter peaks that are too close to the edges
+                edge_margin = (freq_axis[-1] - freq_axis[0]) * 0.05
+                valid_peaks = peaks[
+                    (peak_positions > freq_axis[0] + edge_margin) & 
+                    (peak_positions < freq_axis[-1] - edge_margin)
+                ]
+                
+                if len(valid_peaks) >= 2:
+                    # Find the leftmost and rightmost prominent peaks
+                    leftmost_idx = valid_peaks[0]
+                    rightmost_idx = valid_peaks[-1]
+                    
+                    # Only accept if the peaks form a reasonable pair
+                    min_separation = (freq_axis[-1] - freq_axis[0]) * 0.1
+                    if freq_axis[rightmost_idx] - freq_axis[leftmost_idx] >= min_separation:
+                        return np.array([leftmost_idx, rightmost_idx])
+                    
+        return np.array([])
 
     @staticmethod
     def estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips):
-        """Improved initial parameter estimation with physical constraints"""
-        # Physics-based constraints for NV centers
-        TYPICAL_WIDTH = 0.006  # 6 MHz typical linewidth
-        MIN_SPLITTING = 0.010  # 10 MHz minimum detectable splitting
-        MAX_SPLITTING = 0.150  # 150 MHz maximum expected splitting
+        """Modified parameter estimation focusing on outer dips"""
+        # Physics-based constraints
+        TYPICAL_WIDTH = 0.006
+        MIN_SPLITTING = 0.010
+        MAX_SPLITTING = 0.150
         
-        # Calculate frequency range and mean for bounds
+        # Calculate frequency range and mean
         freq_range = freq_axis[-1] - freq_axis[0]
         mean_freq = np.mean(freq_axis)
         
         # Baseline estimation using 95th percentile
         I0_est = np.percentile(pixel_data_norm, 95)
         
-        # Apply Savitzky-Golay filter for smoother analysis
+        # Apply Savitzky-Golay filter
         window_length = min(11, len(pixel_data_norm)//2*2+1)
         smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
         
         if len(dips) >= 2:
-            # Sort dips by depth
-            dip_depths = I0_est - smoothed_data[dips]
-            sorted_indices = np.argsort(dip_depths)[::-1]
-            main_dips = dips[sorted_indices[:2]]
-            
-            # Calculate center frequency and splitting
-            f_dip_1, f_dip_2 = sorted([freq_axis[d] for d in main_dips])
+            # Use outermost dips
+            f_dip_1, f_dip_2 = sorted([freq_axis[d] for d in [dips[0], dips[-1]]])
             f_center_est = (f_dip_1 + f_dip_2) / 2
             f_delta_est = f_dip_2 - f_dip_1
             
-            # Estimate width using FWHM
-            dip_depths = [I0_est - smoothed_data[d] for d in main_dips]
-            half_max_levels = [I0_est - depth/2 for depth in dip_depths]
-            
-            widths = []
-            for dip_idx, half_max in zip(main_dips, half_max_levels):
-                left_idx = dip_idx
-                while left_idx > 0 and smoothed_data[left_idx] < half_max:
-                    left_idx -= 1
-                right_idx = dip_idx
-                while right_idx < len(freq_axis)-1 and smoothed_data[right_idx] < half_max:
-                    right_idx += 1
-                    
-                width = freq_axis[right_idx] - freq_axis[left_idx]
-                widths.append(width)
-            
-            width_est = np.mean(widths) * 0.5  # Convert FWHM to Lorentzian width
-            A_est = np.mean(dip_depths)
-            
-        elif len(dips) == 1:
-            # Single dip case
-            dip_idx = dips[0]
-            f_center_est = freq_axis[dip_idx]
-            
-            # Measure FWHM for the single dip
-            dip_depth = I0_est - smoothed_data[dip_idx]
-            half_max = I0_est - dip_depth/2
-            
-            left_idx = dip_idx
-            while left_idx > 0 and smoothed_data[left_idx] < half_max:
-                left_idx -= 1
-            right_idx = dip_idx
-            while right_idx < len(freq_axis)-1 and smoothed_data[right_idx] < half_max:
-                right_idx += 1
-                
-            measured_width = freq_axis[right_idx] - freq_axis[left_idx]
-            
-            # Check if this might be a merged peak
-            if measured_width > TYPICAL_WIDTH * 3:
-                width_est = TYPICAL_WIDTH
-                f_delta_est = measured_width * 0.6
-            else:
-                width_est = measured_width * 0.5
-                f_delta_est = MIN_SPLITTING
-                
-            A_est = dip_depth
+            # Calculate width and amplitude from outer dips
+            outer_depths = [I0_est - smoothed_data[d] for d in [dips[0], dips[-1]]]
+            width_est = TYPICAL_WIDTH
+            A_est = np.mean(outer_depths)
             
         else:
-            # No dips found - use default values
-            f_center_est = 2.87  # Zero-field splitting
+            # Fallback to default values
+            f_center_est = 2.87
             f_delta_est = MIN_SPLITTING
             width_est = TYPICAL_WIDTH
             A_est = 0.1 * np.ptp(pixel_data_norm)
-
-        # Apply physical constraints
+        
+        # Apply constraints
         width_est = np.clip(width_est, TYPICAL_WIDTH*0.5, TYPICAL_WIDTH*2)
         f_delta_est = np.clip(f_delta_est, MIN_SPLITTING, MAX_SPLITTING)
         f_center_est = np.clip(f_center_est, mean_freq - 0.1, mean_freq + 0.1)
@@ -909,20 +857,76 @@ class ODMRAnalyzer:
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
-        Fit single pixel data using hybrid logarithmic scale optimization
+        Enhanced single pixel fitting with better handling of merged dips
         """
-        # Normalize data for numerical stability
+        # Normalize data
         scale_factor = np.max(np.abs(pixel_data))
         if scale_factor == 0:
             scale_factor = 1
         pixel_data_norm = pixel_data / scale_factor
         
-        # Find dips for initial estimates
-        dips = ODMRAnalyzer.find_dips_robustly(freq_axis, pixel_data_norm)
+        # Apply Savitzky-Golay filter for smoother analysis
+        window_length = min(11, len(pixel_data_norm)//2*2+1)
+        smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
         
-        # Get parameter estimates
-        I0_est, A_est, width_est, f_center_est, f_delta_est = \
-            ODMRAnalyzer.estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips)
+        # Find dips in smoothed data
+        inverted = -smoothed_data
+        
+        # Try to find dips with different prominence levels
+        prominences = [0.01, 0.005, 0.002]
+        all_peaks = []
+        peak_properties = None
+        
+        for prominence in prominences:
+            peaks, properties = find_peaks(inverted, 
+                                        prominence=prominence,
+                                        width=2,
+                                        distance=3)
+            if len(peaks) > 0:
+                all_peaks = peaks
+                peak_properties = properties
+                break
+        
+        # Initial parameter estimation
+        I0_est = np.percentile(pixel_data_norm, 95)
+        
+        # Case 1: Multiple distinct peaks found
+        if len(all_peaks) >= 2:
+            # Use the two most prominent peaks
+            peak_prominences = peak_properties['prominences']
+            sorted_indices = np.argsort(peak_prominences)[::-1]
+            main_peaks = all_peaks[sorted_indices[:2]]
+            
+            f_dip_1, f_dip_2 = sorted([freq_axis[idx] for idx in main_peaks])
+            f_center_est = (f_dip_1 + f_dip_2) / 2
+            f_delta_est = f_dip_2 - f_dip_1
+            width_est = 0.006  # typical NV linewidth
+            A_est = np.mean([I0_est - smoothed_data[idx] for idx in main_peaks])
+            
+        # Case 2: Single peak found - potential merged dips
+        elif len(all_peaks) == 1:
+            peak_idx = all_peaks[0]
+            peak_width = peak_properties['widths'][0]
+            
+            # Check if this might be a merged peak
+            if peak_width > 6:  # wider than typical single dip
+                f_center_est = freq_axis[peak_idx]
+                f_delta_est = 0.010  # minimum splitting
+                width_est = 0.006
+                A_est = I0_est - smoothed_data[peak_idx]
+            else:
+                # Treat as single dip with minimal splitting
+                f_center_est = freq_axis[peak_idx]
+                f_delta_est = 0.005  # very small splitting
+                width_est = peak_width * (freq_axis[1] - freq_axis[0]) / 4
+                A_est = I0_est - smoothed_data[peak_idx]
+        
+        # Case 3: No peaks found
+        else:
+            f_center_est = 2.87  # typical zero-field splitting
+            f_delta_est = 0.010
+            width_est = 0.006
+            A_est = 0.1 * np.ptp(pixel_data_norm)
         
         # Convert amplitude parameters to log space
         epsilon = 1e-10
@@ -935,22 +939,21 @@ class ODMRAnalyzer:
         
         # Set bounds for TRF method
         if method == 'trf':
-            # Define bounds in hybrid space
             bounds = (
-                # Lower bounds: [log_I0, log_A, log_width, f_center, f_delta]
-                [np.log(0.1), np.log(1e-3), np.log(0.001), 2.82, 0.01],
+                # Lower bounds
+                [np.log(0.1), np.log(1e-3), np.log(0.001), 2.82, 0.005],  # Reduced minimum f_delta
                 # Upper bounds
                 [np.log(10.0), np.log(1.0), np.log(0.1), 2.94, 0.14]
             )
             
-            # Ensure initial parameters are within bounds
+            # Clip initial parameters to bounds
             for i, (param, (lower, upper)) in enumerate(zip(p0, zip(*bounds))):
                 p0[i] = np.clip(param, lower, upper)
         else:
             bounds = (-np.inf, np.inf)
         
         try:
-            # Fit using curve_fit
+            # Try first fit
             popt, pcov = curve_fit(
                 ODMRAnalyzer.double_dip_func_hybrid,
                 freq_axis,
@@ -963,28 +966,45 @@ class ODMRAnalyzer:
                 xtol=1e-4
             )
             
-            # Convert parameters back to linear space and original scale
+            # Calculate fit quality
+            fitted_curve = ODMRAnalyzer.double_dip_func_hybrid(freq_axis, *popt)
+            quality_score = calculate_fit_quality(pixel_data_norm, fitted_curve)
+            
+            # If poor fit, try again with single dip assumption
+            if quality_score < 0.6:
+                p0[4] = np.log(0.005)  # Very small f_delta
+                popt, pcov = curve_fit(
+                    ODMRAnalyzer.double_dip_func_hybrid,
+                    freq_axis,
+                    pixel_data_norm,
+                    p0=p0,
+                    bounds=bounds if method == 'trf' else (-np.inf, np.inf),
+                    method=method,
+                    maxfev=3000,
+                    ftol=1e-4,
+                    xtol=1e-4
+                )
+                
+                # Recalculate quality
+                fitted_curve = ODMRAnalyzer.double_dip_func_hybrid(freq_axis, *popt)
+                quality_score = calculate_fit_quality(pixel_data_norm, fitted_curve)
+            
+            # Convert back to linear space and original scale
             I0 = np.exp(popt[0]) * scale_factor
             A = np.exp(popt[1]) * scale_factor
             width = np.exp(popt[2])
             f_center = popt[3]
             f_delta = popt[4]
             
-            # Calculate fit quality
-            fitted_curve = ODMRAnalyzer.double_dip_func_hybrid(freq_axis, *popt)
-            quality_score = calculate_fit_quality(pixel_data_norm, fitted_curve)
-            
-            # Return default values if fit quality is poor
+            # Final quality check
             if quality_score < 0.5:
-                if default_values is None:
-                    default_values = {
-                        "I0": np.mean(pixel_data),
-                        "A": np.ptp(pixel_data) * 0.1,
-                        "width": (freq_axis[-1] - freq_axis[0]) * 0.1,
-                        "f_center": np.mean(freq_axis),
-                        "f_delta": (freq_axis[-1] - freq_axis[0]) * 0.2
-                    }
-                return default_values
+                return default_values if default_values is not None else {
+                    "I0": np.mean(pixel_data),
+                    "A": np.ptp(pixel_data) * 0.1,
+                    "width": 0.006,
+                    "f_center": np.mean(freq_axis),
+                    "f_delta": 0.010
+                }
             
             return {
                 "I0": I0,
@@ -995,17 +1015,15 @@ class ODMRAnalyzer:
             }
             
         except Exception as e:
-            print(f"Fitting failed with error: {str(e)}")
-            if default_values is None:
-                default_values = {
-                    "I0": np.mean(pixel_data),
-                    "A": np.ptp(pixel_data) * 0.1,
-                    "width": (freq_axis[-1] - freq_axis[0]) * 0.1,
-                    "f_center": np.mean(freq_axis),
-                    "f_delta": (freq_axis[-1] - freq_axis[0]) * 0.2
-                }
-            return default_values
-                
+            print(f"Fitting failed: {str(e)}")
+            return default_values if default_values is not None else {
+                "I0": np.mean(pixel_data),
+                "A": np.ptp(pixel_data) * 0.1,
+                "width": 0.006,
+                "f_center": np.mean(freq_axis),
+                "f_delta": 0.010
+            }
+                    
 
     @timing_decorator    
     def fit_double_lorentzian(self, method='trf', output_dir=None):
@@ -1267,8 +1285,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730338486.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730338486.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730052773.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730052773.json"
 
     # Initialize analyzer at the start
     analyzer = None
