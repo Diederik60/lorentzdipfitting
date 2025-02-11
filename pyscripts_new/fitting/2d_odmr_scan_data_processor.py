@@ -309,65 +309,68 @@ class ODMRFitChecker:
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - \
                A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
-    def calculate_neighborhood_average(self, data, x, y, quality_scores):
+    def calculate_neighborhood_average(self, original_data, x, y):
         """
-        Calculate the average of surrounding pixels, considering quality scores
+        Calculate neighborhood average using a more robust approach.
+        When threshold is high, we use the best available neighbors instead of all neighbors.
         """
-        M, N = data.shape
-        values = []
-        weights = []  # Add weights based on quality scores
+        height, width = original_data.shape
+        neighbors = []
         
+        # Collect all valid neighbors and their quality scores
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
                 if dx == 0 and dy == 0:
                     continue
                     
-                new_x, new_y = x + dx, y + dy
-                if 0 <= new_x < M and 0 <= new_y < N:
-                    if quality_scores[new_x, new_y] > self.quality_threshold:
-                        values.append(data[new_x, new_y])
-                        weights.append(quality_scores[new_x, new_y])
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < height and 0 <= ny < width:
+                    neighbors.append({
+                        'value': original_data[nx, ny],
+                        'quality': self.quality_scores[nx, ny]
+                    })
         
-        if values:
-            return np.average(values, weights=weights)
-        return data[x, y]  # Return original value if no good neighbors found
+        if not neighbors:
+            return original_data[x, y]
+            
+        # Sort neighbors by quality score
+        neighbors.sort(key=lambda x: x['quality'], reverse=True)
+        
+        # If we have any neighbors above threshold, use only those
+        good_neighbors = [n['value'] for n in neighbors if n['quality'] >= self.quality_threshold]
+        if good_neighbors:
+            return np.mean(good_neighbors)
+        
+        # If threshold is high and no good neighbors, use top 3 best quality neighbors
+        if self.quality_threshold > 0.95:
+            top_neighbors = [n['value'] for n in neighbors[:3]]
+            return np.mean(top_neighbors)
+        
+        # Otherwise, return original value
+        return original_data[x, y]
 
     def get_averaged_data(self, data_key):
         """
-        Get data with neighborhood averaging applied to low-quality pixels.
-        
-        Args:
-            data_key (str): Key identifying which data to process
-            
-        Returns:
-            np.ndarray: Processed data with averaging applied
+        Apply averaging to pixels with low quality scores.
+        Never average the quality scores themselves.
         """
-        # Check if we already calculated this
-        if not self.enable_averaging:
+        # Return original data if averaging is off or if showing quality scores
+        if not self.enable_averaging or data_key == 'Fit Quality':
             return self.viz_options[data_key]['data']
-            
-        if data_key in self.averaged_data:
-            return self.averaged_data[data_key]
-            
-        # Get original data
-        original_data = self.viz_options[data_key]['data']
-        averaged_data = original_data.copy()
         
-        # Apply averaging to low-quality pixels
-        M, N = original_data.shape
-        for x in range(M):
-            for y in range(N):
+        # Get the data we want to average
+        original_data = self.viz_options[data_key]['data']
+        result = original_data.copy()
+        
+        # Find all pixels with low quality scores
+        height, width = original_data.shape
+        for x in range(height):
+            for y in range(width):
                 if self.quality_scores[x, y] < self.quality_threshold:
-                    averaged_data[x, y] = self.calculate_neighborhood_average(
-                    original_data, 
-                    x, 
-                    y,
-                    self.quality_scores  # Pass the quality scores array
-                )
-                    
-        # Cache the result
-        self.averaged_data[data_key] = averaged_data
-        return averaged_data
+                    # Replace low quality pixels with neighborhood average
+                    result[x, y] = self.calculate_neighborhood_average(original_data, x, y)
+        
+        return result
 
     def update_data_ranges(self):
         """Calculate and store data ranges for plotting"""
@@ -683,7 +686,6 @@ class ODMRFitChecker:
                         self.fitting_params[:, :, i], 
                         self.x_idx, 
                         self.y_idx,
-                        self.quality_scores  # Add this parameter
                     )
                     param_str += f'\n{param_name}={averaged_val:.3f}'
             else:
