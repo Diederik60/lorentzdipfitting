@@ -15,6 +15,7 @@ from functools import partial
 from pathlib import Path
 import re
 from matplotlib.widgets import Slider, Button, RadioButtons
+from matplotlib.colors import LogNorm, Normalize
 '''
 
 Statistics of data provided by Dylan, this data is concerns 20x20x100 2D ODMR scan data
@@ -136,7 +137,6 @@ def timing_decorator(func):
         print(f"{func.__name__} took {execution_time:.4f} seconds to execute")
         return result
     return wrapper
-
 
 def process_pixel_row(args):
     m, data, freq_axis, default_values, method = args
@@ -298,364 +298,423 @@ class ODMRFitChecker:
             }
         }
 
+        # Then initialize log_scale_states
+        self.log_scale_states = {key: False for key in self.viz_options.keys()}
+
+        self._update_timer = None  # For debouncing
+        self.averaged_data = {}    # For caching averaged data
+
     def double_lorentzian(self, f, I0, A, width, f_center, f_delta):
         """Calculate double Lorentzian function with given parameters."""
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - \
                A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
-    def calculate_neighborhood_average(self, data, x, y):
+    def calculate_neighborhood_average(self, original_data, x, y):
         """
-        Calculate the average of the 8 surrounding pixels.
-        
-        Args:
-            data (np.ndarray): 2D array of data
-            x (int): x coordinate of center pixel
-            y (int): y coordinate of center pixel
-            
-        Returns:
-            float: Average value of surrounding pixels
+        Calculate neighborhood average using a more robust approach.
+        When threshold is high, we use the best available neighbors instead of all neighbors.
         """
-        M, N = data.shape
-        values = []
+        height, width = original_data.shape
+        neighbors = []
         
-        # Define the neighborhood coordinates
+        # Collect all valid neighbors and their quality scores
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                # Skip the center pixel
                 if dx == 0 and dy == 0:
                     continue
                     
-                # Check boundaries
-                new_x, new_y = x + dx, y + dy
-                if 0 <= new_x < M and 0 <= new_y < N:
-                    values.append(data[new_x, new_y])
-                    
-        return np.mean(values) if values else data[x, y]
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < height and 0 <= ny < width:
+                    neighbors.append({
+                        'value': original_data[nx, ny],
+                        'quality': self.quality_scores[nx, ny]
+                    })
+        
+        if not neighbors:
+            return original_data[x, y]
+            
+        # Sort neighbors by quality score
+        neighbors.sort(key=lambda x: x['quality'], reverse=True)
+        
+        # If we have any neighbors above threshold, use only those
+        good_neighbors = [n['value'] for n in neighbors if n['quality'] >= self.quality_threshold]
+        if good_neighbors:
+            return np.mean(good_neighbors)
+        
+        # If threshold is high and no good neighbors, use top 3 best quality neighbors
+        if self.quality_threshold > 0.95:
+            top_neighbors = [n['value'] for n in neighbors[:3]]
+            return np.mean(top_neighbors)
+        
+        # Otherwise, return original value
+        return original_data[x, y]
 
     def get_averaged_data(self, data_key):
         """
-        Get data with neighborhood averaging applied to low-quality pixels.
-        
-        Args:
-            data_key (str): Key identifying which data to process
-            
-        Returns:
-            np.ndarray: Processed data with averaging applied
+        Apply averaging to pixels with low quality scores.
+        Never average the quality scores themselves.
         """
-        # Check if we already calculated this
-        if not self.enable_averaging:
+        # Return original data if averaging is off or if showing quality scores
+        if not self.enable_averaging or data_key == 'Fit Quality':
             return self.viz_options[data_key]['data']
-            
-        if data_key in self.averaged_data:
-            return self.averaged_data[data_key]
-            
-        # Get original data
+        
+        # Get the data we want to average
         original_data = self.viz_options[data_key]['data']
-        averaged_data = original_data.copy()
+        result = original_data.copy()
         
-        # Apply averaging to low-quality pixels
-        M, N = original_data.shape
-        for x in range(M):
-            for y in range(N):
+        # Find all pixels with low quality scores
+        height, width = original_data.shape
+        for x in range(height):
+            for y in range(width):
                 if self.quality_scores[x, y] < self.quality_threshold:
-                    averaged_data[x, y] = self.calculate_neighborhood_average(
-                        original_data, x, y
-                    )
-                    
-        # Cache the result
-        self.averaged_data[data_key] = averaged_data
-        return averaged_data
+                    # Replace low quality pixels with neighborhood average
+                    result[x, y] = self.calculate_neighborhood_average(original_data, x, y)
+        
+        return result
 
-    def create_interactive_viewer(self):
-        """Create interactive viewer with quality assessment display"""
-        # Set up the figure with adjusted spacing
-        self.fig = plt.figure(figsize=(16, 8))
-        
-        # Increase left margin to make room for radio buttons
-        plt.subplots_adjust(bottom=0.25, left=0.2)  # Increased left margin
-        
-        gs = self.fig.add_gridspec(1, 2, width_ratios=[1, 1])
-        self.ax_data = self.fig.add_subplot(gs[0])
-        self.ax_map = self.fig.add_subplot(gs[1])
-        
-        # Initial state
-        self.x_idx, self.y_idx = 0, 0
-        self.full_range = True
-        self.current_viz = 'Fit Quality'
-        self.local_scaling = True  # Add this line for scaling state
-        
-        # Get initial data range for consistent y-axis limits
-        y_data = self.original_data[self.x_idx, self.y_idx]
+    def update_data_ranges(self):
+        """Calculate and store data ranges for plotting"""
+        # Initialize data ranges and margins
         self.y_min = np.min(self.original_data)
         self.y_max = np.max(self.original_data)
-        y_range = self.y_max - self.y_min
-        self.y_margin = y_range * 0.3
-                
-        # Plot initial spectrum with fixed y-axis limits
-        self.spectrum_line, = self.ax_data.plot(self.freq_axis, y_data, 'b.', label='Data')
-        self.ax_data.set_ylim(self.y_min - self.y_margin, self.y_max + self.y_margin)
+        self.y_range = self.y_max - self.y_min
+        self.y_margin = self.y_range * 0.3
         
-        # Calculate and plot initial fit
+        # Store global ranges for consistent scaling
+        self.global_y_min = np.min(self.original_data)
+        self.global_y_max = np.max(self.original_data)
+        self.global_y_range = self.global_y_max - self.global_y_min
+        self.y_margin_factor = 0.05  # Factor for dynamic margin calculation
+
+    def initialize_plots(self):
+        """Initialize all plot elements"""
+        # Create spectrum plot
+        y_data = self.original_data[self.x_idx, self.y_idx]
+        self.spectrum_line, = self.ax_data.plot(self.freq_axis, y_data, 'b.', label='Data')
+        
+        # Create fit line
         params = self.fitting_params[self.x_idx, self.y_idx]
         fitted_curve = self.double_lorentzian(self.freq_axis, *params)
         self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', label='Fit')
         
-        # Set initial x-axis limits
+        # Set initial axis limits
         self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
+        self.ax_data.set_ylim(self.y_min - self.y_margin, self.y_max + self.y_margin)
         
-        # Create initial parameter map
-        viz_data = self.viz_options[self.current_viz]['data']
-        self.map_img = self.ax_map.imshow(viz_data.T, origin='lower', 
+        # Create map visualization
+        viz_data = self.get_averaged_data(self.current_viz)
+        self.map_img = self.ax_map.imshow(viz_data.T, origin='lower',
                                         cmap=self.viz_options[self.current_viz]['cmap'])
         self.pixel_marker, = self.ax_map.plot(self.x_idx, self.y_idx, 'rx')
         
         # Add colorbar
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
         self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
+
+    def create_interactive_viewer(self):
+        """Create interactive viewer with improved update handling"""
+        # Set up the figure with tight_layout for better spacing
+        self.fig = plt.figure(figsize=(16, 8))
+        self.fig.set_tight_layout(False)
+        plt.subplots_adjust(bottom=0.25, left=0.2)
         
-        # Set up axis labels and titles
+        # Create grid and subplots
+        gs = self.fig.add_gridspec(1, 2, width_ratios=[1, 1])
+        self.ax_data = self.fig.add_subplot(gs[0])
+        self.ax_map = self.fig.add_subplot(gs[1])
+        
+        # Initialize state variables
+        self.x_idx, self.y_idx = 0, 0
+        self.full_range = True
+        self.current_viz = 'Fit Quality'
+        self.local_scaling = True
+        
+        # Calculate initial ranges and create plots
+        self.update_data_ranges()
+        self.initialize_plots()
+        
+        # Set labels and titles
         self.ax_data.set_xlabel('Frequency (GHz)')
         self.ax_data.set_ylabel('ODMR Signal (a.u.)')
         self.ax_data.legend()
         self.ax_map.set_xlabel('X Position')
         self.ax_map.set_ylabel('Y Position')
         
-        # Add overall statistics to title
-        self.ax_map.set_title(
-            f'Success Rate: {self.success_rate:.1f}%\n'
-            f'Mean Quality: {self.mean_quality:.3f}'
-        )
+        # Create UI elements with improved positioning
+        self._create_sliders()
+        self._create_radio_buttons()
+        self._create_control_buttons()
         
-        # Keep track of scaling mode
-        self.local_scaling = True  # Start with local scaling by default
+        # Connect mouse click event for map interaction
+        self.fig.canvas.mpl_connect('button_press_event', self._on_map_click)
         
-        # Add button for toggling x-axis range and y-axis scaling
-        ax_range_button = plt.axes([0.85, 0.15, 0.1, 0.04])  # X-axis range toggle
-        ax_scale_button = plt.axes([0.85, 0.08, 0.1, 0.04])  # Y-axis scaling toggle
-        self.range_button = Button(ax_range_button, 'Toggle Range')
-        self.scale_button = Button(ax_scale_button, 'Toggle Scale')
+        # Enable keyboard navigation
+        self.fig.canvas.mpl_connect('key_press_event', self._on_key_press)
         
-        # Calculate global data range once
-        self.global_y_min = np.min(self.original_data)
-        self.global_y_max = np.max(self.original_data)
-        self.global_y_range = self.global_y_max - self.global_y_min
-        self.y_margin_factor = 0.05  # 5% margin
+        # Connect figure close event
+        self.fig.canvas.mpl_connect('close_event', self.handle_close)
+        
+        # Initial update
+        self.force_update()
+        
+        # Show the plot
+        plt.show()
+    
+    def update_axis_limits(self, y_data, fitted_curve, params):
+        """Update axis limits based on current settings"""
+        # Y-axis limits
+        local_min = min(np.min(y_data), np.min(fitted_curve))
+        local_max = max(np.max(y_data), np.max(fitted_curve))
+        local_range = local_max - local_min
+        y_center = (local_max + local_min) / 2
+        
+        if self.local_scaling:
+            y_margin = local_range * self.y_margin_factor
+            self.ax_data.set_ylim(
+                y_center - local_range/2 - y_margin,
+                y_center + local_range/2 + y_margin
+            )
+        else:
+            y_margin = self.global_y_range * self.y_margin_factor
+            self.ax_data.set_ylim(
+                self.global_y_min - y_margin,
+                self.global_y_max + y_margin
+            )
+        
+        # X-axis limits
+        if self.full_range:
+            self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
+        else:
+            f_center = params[3]
+            f_delta = params[4]
+            width = params[2]
+            x_margin = max(width * 4, f_delta * 1.5)
+            self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
 
-        # Create sliders for x and y coordinates
+    def _create_sliders(self):
+        """Create sliders with improved update handling"""
         ax_x = plt.axes([0.2, 0.1, 0.6, 0.03])
         ax_y = plt.axes([0.2, 0.05, 0.6, 0.03])
+        ax_threshold = plt.axes([0.2, 0.15, 0.6, 0.03])
         
         self.x_slider = Slider(ax_x, 'X', 0, self.M-1, valinit=0, valstep=1)
         self.y_slider = Slider(ax_y, 'Y', 0, self.N-1, valinit=0, valstep=1)
-        
-        # Add button for toggling x-axis range
-        ax_button = plt.axes([0.85, 0.15, 0.1, 0.04])
-        self.range_button = Button(ax_button, 'Toggle Range')
-        
-        # Move radio buttons further left and make them smaller
-        ax_radio = plt.axes([0.02, 0.25, 0.1, 0.6])  # Adjusted position
-        self.viz_radio = RadioButtons(ax_radio, list(self.viz_options.keys()), 
-                                    active=list(self.viz_options.keys()).index(self.current_viz))
-        
-        # Make radio button labels smaller and adjust their position
-        for label in self.viz_radio.labels:
-            label.set_fontsize(7)  # Smaller font
-
-
-        # Add toggle button for neighborhood averaging
-        ax_avg_button = plt.axes([0.85, 0.22, 0.1, 0.04])
-        self.avg_button = Button(ax_avg_button, 'Toggle Averaging')
-
-        ax_threshold = plt.axes([0.2, 0.15, 0.6, 0.03])
         self.threshold_slider = Slider(
             ax_threshold, 'Quality Threshold', 
             0.0, 1.0, valinit=self.quality_threshold,
-            valstep=0.001  # Changed from 0.01 to 0.001 for even finer control
+            valstep=0.001
         )
         
-        def update_pixel_marker():
-            """Helper function to update pixel marker position"""
-            self.pixel_marker.set_data([self.x_idx], [self.y_idx])
+        # Connect slider events with immediate updates
+        self.x_slider.on_changed(self._on_slider_change)
+        self.y_slider.on_changed(self._on_slider_change)
+        self.threshold_slider.on_changed(self._on_threshold_change)
 
-        def toggle_averaging(event):
-            """Toggle neighborhood averaging"""
-            self.enable_averaging = not self.enable_averaging
-            
-            # Clear cached averages
-            self.averaged_data.clear()
-            
-            # Update the current visualization
-            viz_data = self.get_averaged_data(self.current_viz)
-            self.map_img.set_data(viz_data.T)
-            
-            # Update colorbar limits for new data
-            vmin = np.min(viz_data)
-            vmax = np.max(viz_data)
-            self.map_img.set_clim(vmin, vmax)
-            
-            # Update pixel marker position
-            update_pixel_marker()
-            
-            # Force a redraw
-            self.fig.canvas.draw_idle()
-            print(f"Neighborhood averaging: {'enabled' if self.enable_averaging else 'disabled'}")
-            
-            # Update the pixel display
-            update(None)
-            
-        def update_threshold(val):
-            """Update quality threshold"""
-            self.quality_threshold = val
-            # Clear cached averages
-            self.averaged_data.clear()
-            
-            if self.enable_averaging:
-                # Update visualization with new threshold
-                viz_data = self.get_averaged_data(self.current_viz)
-                self.map_img.set_data(viz_data.T)
-                
-                # Update colorbar limits
-                vmin = np.min(viz_data)
-                vmax = np.max(viz_data)
-                self.map_img.set_clim(vmin, vmax)
-                
-                # Update pixel marker position
-                update_pixel_marker()
-                
-                # Force a redraw
-                self.fig.canvas.draw_idle()
-                
-            # Update the pixel display
-            update(None)
-                
-        def update_viz(label):
-            """Update visualization with averaging support"""
-            self.current_viz = label
-            
-            # Get data with averaging if enabled
-            viz_data = self.get_averaged_data(label)
-            
-            # Update colormap
-            self.map_img.set_data(viz_data.T)
-            self.map_img.set_cmap(self.viz_options[label]['cmap'])
-            
-            # Update colorbar label
-            self.colorbar.set_label(self.viz_options[label]['label'])
-            
-            # Update colorbar limits and scale
-            vmin = np.min(viz_data)
-            vmax = np.max(viz_data)
-            self.map_img.set_clim(vmin, vmax)
-            
-            # Update pixel marker position
-            update_pixel_marker()
-            
-            # Force a redraw
-            self.fig.canvas.draw_idle()
-
-        def toggle_range(event):
-            self.full_range = not self.full_range
-            update(None)
+    def _create_radio_buttons(self):
+        """Create radio buttons with improved layout"""
+        ax_radio = plt.axes([0.02, 0.25, 0.1, 0.6])
+        self.viz_radio = RadioButtons(ax_radio, list(self.viz_options.keys()), 
+                                    active=list(self.viz_options.keys()).index(self.current_viz))
         
-        def toggle_scaling(event):  # Add this new function
-            self.local_scaling = not self.local_scaling
-            if self.local_scaling:
-                print("Using local y-axis scaling")
-            else:
-                print("Using global y-axis scaling")
-            update(None)
+        # Improve radio button appearance
+        for label in self.viz_radio.labels:
+            label.set_fontsize(7)
+        
+        self.viz_radio.on_clicked(self._on_viz_change)
 
-        def update(val):
-            """Update display with averaging support"""
-            self.x_idx = int(self.x_slider.val)
-            self.y_idx = int(self.y_slider.val)
+    def _create_control_buttons(self):
+        """Create control buttons with consistent layout"""
+        button_width = 0.1
+        button_height = 0.04
+        button_left = 0.85
+        
+        buttons_config = [
+            ('log_button', 'Toggle Log Scale', 0.29),
+            ('avg_button', 'Toggle Averaging', 0.22),
+            ('range_button', 'Toggle Range', 0.15),
+            ('scale_button', 'Toggle Scale', 0.08)
+        ]
+        
+        for attr_name, label, position in buttons_config:
+            ax = plt.axes([button_left, position, button_width, button_height])
+            button = Button(ax, label)
+            setattr(self, attr_name, button)
+            # Create a separate function to properly capture the button name
+            def make_callback(name):
+                return lambda event: self._on_button_click(event, name)
+            button.on_clicked(make_callback(attr_name))
+
+    def _on_slider_change(self, val):
+        """Handle slider changes with immediate update"""
+        self.x_idx = int(self.x_slider.val)
+        self.y_idx = int(self.y_slider.val)
+        self.force_update()
+
+    def _on_threshold_change(self, val):
+        """Handle threshold changes with immediate update"""
+        self.quality_threshold = val
+        self.averaged_data.clear()
+        self.force_update()
+
+    def _on_viz_change(self, label):
+        """Handle visualization changes with immediate update"""
+        self.current_viz = label
+        self.force_update()
+
+    def _on_button_click(self, event, button_name):
+        """Handle button clicks with immediate update"""
+        if button_name == 'log_button':
+            self.log_scale_states[self.current_viz] = not self.log_scale_states[self.current_viz]
+        elif button_name == 'avg_button':
+            self.enable_averaging = not self.enable_averaging
+            self.averaged_data.clear()
+        elif button_name == 'range_button':
+            self.full_range = not self.full_range
+        elif button_name == 'scale_button':
+            self.local_scaling = not self.local_scaling
+        
+        self.force_update()
+
+    def _on_map_click(self, event):
+        """Handle mouse clicks on the map"""
+        if event.inaxes == self.ax_map:
+            x = int(event.xdata)
+            y = int(event.ydata)
+            if 0 <= x < self.M and 0 <= y < self.N:
+                self.x_idx = x
+                self.y_idx = y
+                self.x_slider.set_val(x)
+                self.y_slider.set_val(y)
+                self.force_update()
+
+    def update_colorbar(self):
+        """Update the colorbar for the current visualization"""
+        viz_data = self.get_averaged_data(self.current_viz)
+        
+        if self.log_scale_states[self.current_viz]:
+            # Handle log scale visualization
+            from matplotlib.colors import LogNorm
+            min_positive = np.min(viz_data[viz_data > 0]) if np.any(viz_data > 0) else 1e-10
+            scaled_data = np.maximum(viz_data, min_positive)
+            self.map_img.norm = LogNorm(vmin=min_positive, vmax=np.max(scaled_data))
+            self.colorbar.set_label(f"{self.viz_options[self.current_viz]['label']} (log scale)")
+        else:
+            # Handle linear scale visualization
+            from matplotlib.colors import Normalize
+            self.map_img.norm = Normalize(vmin=np.min(viz_data), vmax=np.max(viz_data))
+            self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
+        
+        # Set the colormap and update the colorbar
+        self.map_img.set_cmap(self.viz_options[self.current_viz]['cmap'])
+        self.colorbar.update_normal(self.map_img)
+
+    def update_axis_limits(self, y_data, fitted_curve, params):
+        """Update axis limits based on current settings"""
+        # Y-axis limits
+        local_min = min(np.min(y_data), np.min(fitted_curve))
+        local_max = max(np.max(y_data), np.max(fitted_curve))
+        local_range = local_max - local_min
+        y_center = (local_max + local_min) / 2
+        
+        if self.local_scaling:
+            y_margin = local_range * self.y_margin_factor
+            self.ax_data.set_ylim(
+                y_center - local_range/2 - y_margin,
+                y_center + local_range/2 + y_margin
+            )
+        else:
+            y_margin = self.global_y_range * self.y_margin_factor
+            self.ax_data.set_ylim(
+                self.global_y_min - y_margin,
+                self.global_y_max + y_margin
+            )
+        
+        # X-axis limits
+        if self.full_range:
+            self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
+        else:
+            f_center = params[3]
+            f_delta = params[4]
+            width = params[2]
+            x_margin = max(width * 4, f_delta * 1.5)
+            self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
+
+    def _on_key_press(self, event):
+        """Handle keyboard navigation"""
+        if event.key in ['left', 'right', 'up', 'down']:
+            x, y = self.x_idx, self.y_idx
             
-            # Update spectrum plot
+            if event.key == 'left':
+                x = max(0, x - 1)
+            elif event.key == 'right':
+                x = min(self.M - 1, x + 1)
+            elif event.key == 'up':
+                y = min(self.N - 1, y + 1)
+            elif event.key == 'down':
+                y = max(0, y - 1)
+            
+            self.x_idx, self.y_idx = x, y
+            self.x_slider.set_val(x)
+            self.y_slider.set_val(y)
+            self.force_update()
+
+    def force_update(self):
+        """Force a complete update of all plot elements"""
+        try:
+            # Update data plot1
             y_data = self.original_data[self.x_idx, self.y_idx]
-            self.spectrum_line.set_ydata(y_data)
-            
-            # Calculate the fitted curve
             params = self.fitting_params[self.x_idx, self.y_idx]
             fitted_curve = self.double_lorentzian(self.freq_axis, *params)
+            
+            self.spectrum_line.set_ydata(y_data)
             self.fit_line.set_ydata(fitted_curve)
             
-            # Get current visualization data with averaging
+            # Update map
             viz_data = self.get_averaged_data(self.current_viz)
             self.map_img.set_data(viz_data.T)
+            self.pixel_marker.set_data([self.x_idx], [self.y_idx])
             
-            # Update pixel marker position
-            update_pixel_marker()  # Add this line here
+            # Update colorbar
+            self.update_colorbar()
             
             # Update parameter display
-            if self.quality_scores[self.x_idx, self.y_idx] < self.quality_threshold and self.enable_averaging:
+            quality_score = self.quality_scores[self.x_idx, self.y_idx]
+            if quality_score < self.quality_threshold and self.enable_averaging:
                 param_str = "Using neighborhood average (low quality fit)"
-                # Get averaged parameters for display
                 for i, param_name in enumerate(['I0', 'A', 'w', 'fc', 'fd']):
                     averaged_val = self.calculate_neighborhood_average(
                         self.fitting_params[:, :, i], 
                         self.x_idx, 
-                        self.y_idx
+                        self.y_idx,
                     )
                     param_str += f'\n{param_name}={averaged_val:.3f}'
             else:
                 param_names = ['I0', 'A', 'w', 'fc', 'fd']
                 param_str = ', '.join([f'{name}={val:.3f}' for name, val in zip(param_names, params)])
-            
-            quality_score = self.quality_scores[self.x_idx, self.y_idx]
             param_str += f'\nquality_score={quality_score:.3f}'
             
-            # Update title and display
             self.ax_data.set_title(f'Pixel ({self.x_idx}, {self.y_idx})\n{param_str}')
             
-            # Calculate local values for y-axis scaling
-            local_min = min(np.min(y_data), np.min(fitted_curve))
-            local_max = max(np.max(y_data), np.max(fitted_curve))
-            local_range = local_max - local_min
-            y_center = (local_max + local_min) / 2
+            # Update axis limits
+            self.update_axis_limits(y_data, fitted_curve, params)
             
-            # Y-axis limits calculation based on scaling mode
-            if self.local_scaling:
-                # Use local min/max for current pixel
-                y_margin = local_range * self.y_margin_factor
-                self.ax_data.set_ylim(
-                    y_center - local_range/2 - y_margin,
-                    y_center + local_range/2 + y_margin
-                )
-            else:
-                # Use global min/max across all pixels
-                y_margin = self.global_y_range * self.y_margin_factor
-                self.ax_data.set_ylim(
-                    self.global_y_min - y_margin,
-                    self.global_y_max + y_margin
-                )
+            # Update map title
+            self.ax_map.set_title(
+                f'Success Rate: {self.success_rate:.1f}%\n'
+                f'Mean Quality: {self.mean_quality:.3f}'
+            )
             
-            # Update x-axis limits based on view mode
-            if self.full_range:
-                self.ax_data.set_xlim(self.freq_axis[0], self.freq_axis[-1])
-            else:
-                f_center = params[3]
-                f_delta = params[4]
-                width = params[2]
-                x_margin = max(width * 4, f_delta * 1.5)
-                self.ax_data.set_xlim(f_center - x_margin, f_center + x_margin)
-            
-            # Force a redraw
+            # Force a complete redraw
             self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+            
+        except Exception as e:
+            print(f"Error during update: {str(e)}")
 
-        # Connect callbacks
-        self.viz_radio.on_clicked(update_viz)
-        self.avg_button.on_clicked(toggle_averaging)
-        self.threshold_slider.on_changed(update_threshold)
-        self.range_button.on_clicked(toggle_range)
-        self.scale_button.on_clicked(toggle_scaling)  
-        self.x_slider.on_changed(update)
-        self.y_slider.on_changed(update)
-        
-        # Initialize plot
-        update(None)
-        
-        # Show the plot
-        plt.show()
+    def handle_close(self, event):
+        """Clean up resources when the figure is closed"""
+        plt.close(self.fig)
+
 
 class ODMRAnalyzer:
     def __init__(self, data_file, json_file, enable_profiling=False):
