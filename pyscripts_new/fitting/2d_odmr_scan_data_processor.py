@@ -214,15 +214,27 @@ class ODMRFitChecker:
         
         # Load frequency parameters
         with open(json_params_file, 'r') as f:
-            params = json.load(f)
-        
+            self.params = json.load(f)
+                
         # Create frequency axis
         self.freq_axis = np.linspace(
-            params['min_freq'] / 1e9,
-            params['max_freq'] / 1e9,
-            params['num_measurements']
+            self.params['min_freq'] / 1e9,
+            self.params['max_freq'] / 1e9,
+            self.params['num_measurements']
         )
         
+        # Create spatial axes
+        self.x_axis = np.linspace(
+            self.params['x1'],
+            self.params['x2'],
+            self.params['x_steps']
+        )
+        self.y_axis = np.linspace(
+            self.params['y1'],
+            self.params['y2'],
+            self.params['y_steps']
+        )
+
         # Get data dimensions
         self.M, self.N = self.fitted_params.shape[:2]
         
@@ -403,10 +415,22 @@ class ODMRFitChecker:
         
         # Create map visualization
         viz_data = self.get_averaged_data(self.current_viz)
-        self.map_img = self.ax_map.imshow(viz_data.T, origin='lower',
-                                        cmap=self.viz_options[self.current_viz]['cmap'])
-        self.pixel_marker, = self.ax_map.plot(self.x_idx, self.y_idx, 'rx')
-        
+        self.map_img = self.ax_map.imshow(
+            viz_data.T,
+            origin='lower',
+            extent=[
+                self.params['x1'],  # Left edge
+                self.params['x2'],  # Right edge
+                self.params['y1'],  # Bottom edge
+                self.params['y2']   # Top edge
+            ],
+            cmap=self.viz_options[self.current_viz]['cmap'],
+            aspect='equal'
+        )
+        x_pos = self.x_axis[self.x_idx]
+        y_pos = self.y_axis[self.y_idx]
+        self.pixel_marker, = self.ax_map.plot(x_pos, y_pos, 'rx')
+                
         # Add colorbar
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
         self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
@@ -576,15 +600,17 @@ class ODMRFitChecker:
         self.force_update()
 
     def _on_map_click(self, event):
-        """Handle mouse clicks on the map"""
+        """Handle mouse clicks on the map with proper coordinate conversion"""
         if event.inaxes == self.ax_map:
-            x = int(event.xdata)
-            y = int(event.ydata)
-            if 0 <= x < self.M and 0 <= y < self.N:
-                self.x_idx = x
-                self.y_idx = y
-                self.x_slider.set_val(x)
-                self.y_slider.set_val(y)
+            # Convert clicked coordinates to nearest pixel indices
+            x_idx = np.argmin(np.abs(self.x_axis - event.xdata))
+            y_idx = np.argmin(np.abs(self.y_axis - event.ydata))
+            
+            if 0 <= x_idx < self.M and 0 <= y_idx < self.N:
+                self.x_idx = x_idx
+                self.y_idx = y_idx
+                self.x_slider.set_val(x_idx)
+                self.y_slider.set_val(y_idx)
                 self.force_update()
 
     def update_colorbar(self):
@@ -669,11 +695,24 @@ class ODMRFitChecker:
             self.spectrum_line.set_ydata(y_data)
             self.fit_line.set_ydata(fitted_curve)
             
-            # Update map
+            # Update map with proper coordinates
             viz_data = self.get_averaged_data(self.current_viz)
             self.map_img.set_data(viz_data.T)
-            self.pixel_marker.set_data([self.x_idx], [self.y_idx])
+
+            # Update marker position with real coordinates
+            x_pos = self.x_axis[self.x_idx]
+            y_pos = self.y_axis[self.y_idx]
+            self.pixel_marker.set_data([x_pos], [y_pos])
             
+            # Update titles and labels with proper coordinates
+            self.ax_data.set_title(
+                f'Position: ({x_pos:.3f}, {y_pos:.3f})\n'
+                f'Quality Score: {self.quality_scores[self.x_idx, self.y_idx]:.3f}'
+            )
+
+            self.ax_map.set_xlabel('X Position (mm)')
+            self.ax_map.set_ylabel('Y Position (mm)')
+                        
             # Update colorbar
             self.update_colorbar()
             
@@ -1344,8 +1383,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730052773.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730052773.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.json"
 
     # Initialize analyzer at the start
     analyzer = None
