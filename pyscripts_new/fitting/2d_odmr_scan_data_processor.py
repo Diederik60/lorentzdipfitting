@@ -151,7 +151,7 @@ def process_pixel_row(args):
     }
     
     for n in range(N):
-        result = ODMRAnalyzer.fit_single_pixel(data[m, n, :], freq_axis, 
+        result = ODMRAnalyzer.fit_single_pixel_widefield(data[m, n, :], freq_axis, 
                                              default_values, method)
         
         # Calculate fitted curve for quality assessment
@@ -1037,13 +1037,31 @@ class ODMRAnalyzer:
         
         # Set bounds for TRF method
         if method == 'trf':
+            
+            # #40x40 sample
+            # bounds = (
+            #     # Lower bounds
+            #     [np.log(0.01), np.log(1e-3), np.log(0.001), 2.80, 0.003],  # Wider frequency range
+            #     # Upper bounds
+            #     [np.log(10.0), np.log(1.0), np.log(0.1), 2.96, 0.16]      # and splitting
+            # )
+
+            #widefield
             bounds = (
                 # Lower bounds
-                [np.log(0.1), np.log(1e-3), np.log(0.001), 2.82, 0.005],  # Reduced minimum f_delta
+                [np.log(0.0001),# Allow for very low baseline (previously 0.1)
+                np.log(1e-6),   # Allow for very small amplitudes
+                np.log(0.001),  # Width can stay the same
+                2.75,           # Frequency center
+                0.001],         # Splitting
                 # Upper bounds
-                [np.log(10.0), np.log(1.0), np.log(0.1), 2.94, 0.14]
+                [np.log(1000.0),  # Allow for higher intensity regions
+                np.log(100.0),   # Allow for large amplitudes in bright regions
+                np.log(0.1),    # Width upper bound
+                3.00,           # Frequency center
+                0.20]           # Splitting
             )
-            
+
             # Clip initial parameters to bounds
             for i, (param, (lower, upper)) in enumerate(zip(p0, zip(*bounds))):
                 p0[i] = np.clip(param, lower, upper)
@@ -1113,7 +1131,7 @@ class ODMRAnalyzer:
             }
             
         except Exception as e:
-            print(f"Fitting failed: {str(e)}")
+            print(f"Fitting failed: {str(e)}") 
             return default_values if default_values is not None else {
                 "I0": np.mean(pixel_data),
                 "A": np.ptp(pixel_data) * 0.1,
@@ -1121,7 +1139,99 @@ class ODMRAnalyzer:
                 "f_center": np.mean(freq_axis),
                 "f_delta": 0.010
             }
-                    
+
+    # method for widefield odmr                
+    @staticmethod
+    def fit_single_pixel_widefield(pixel_data, freq_axis, default_values=None, method='trf'):
+        """
+        Simplified fitting function specifically for widefield ODMR with low SNR.
+        Prioritizes speed and robustness over accuracy.
+        """
+        # Quick check for very low signal pixels
+        if np.max(pixel_data) < 0.1:
+            return default_values
+        
+        # Simple normalization - no need for complex scaling
+        pixel_data_norm = pixel_data / np.max(pixel_data)
+        
+        # Apply heavy smoothing to handle low SNR
+        window_length = min(31, len(pixel_data_norm)//2*2+1)  # Larger window for more smoothing
+        smoothed = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=2)
+        
+        # Use simpler peak finding with relaxed criteria
+        inverted = -smoothed
+        peaks, _ = find_peaks(inverted, prominence=0.005, distance=5)
+        
+        # Very simple parameter estimation
+        I0_est = 1.0  # Since we normalized
+        
+        if len(peaks) >= 2:
+            # Just take the two deepest dips
+            main_peaks = peaks[np.argsort(inverted[peaks])[-2:]]
+            f_dip_1, f_dip_2 = sorted([freq_axis[idx] for idx in main_peaks])
+            f_center_est = (f_dip_1 + f_dip_2) / 2
+            f_delta_est = f_dip_2 - f_dip_1
+            A_est = 0.1  # Simplified amplitude estimate
+        else:
+            # Default parameters centered around typical NV values
+            f_center_est = 2.87
+            f_delta_est = 0.01
+            A_est = 0.1
+        
+        # Use fixed width for simplicity
+        width_est = 0.006
+        
+        # Very relaxed bounds for fitting
+        bounds = (
+            # Lower bounds - much more relaxed
+            [np.log(0.1), np.log(0.001), np.log(0.001), 2.7, 0.001],
+            # Upper bounds - wide range
+            [np.log(10.0), np.log(1.0), np.log(0.1), 3.0, 0.3]
+        )
+        
+        # Initial parameters
+        p0 = [
+            np.log(I0_est),
+            np.log(A_est),
+            np.log(width_est),
+            f_center_est,
+            f_delta_est
+        ]
+        
+        try:
+            # Quick fit with relaxed convergence criteria
+            popt, _ = curve_fit(
+                ODMRAnalyzer.double_dip_func_hybrid,
+                freq_axis,
+                pixel_data_norm,
+                p0=p0,
+                bounds=bounds,
+                method=method,
+                maxfev=1000,    # Reduced iterations
+                ftol=1e-2,      # Very relaxed tolerance
+                xtol=1e-2       # Very relaxed tolerance
+            )
+            
+            # Convert back to original scale
+            return {
+                "I0": np.exp(popt[0]) * np.max(pixel_data),
+                "A": np.exp(popt[1]) * np.max(pixel_data),
+                "width": np.exp(popt[2]),
+                "f_center": popt[3],
+                "f_delta": popt[4]
+            }
+            
+        except Exception as e:
+            # Return default values if fit fails
+            if default_values is None:
+                default_values = {
+                    "I0": np.mean(pixel_data),
+                    "A": 0.1 * np.max(pixel_data),
+                    "width": 0.006,
+                    "f_center": 2.87,
+                    "f_delta": 0.01
+                }
+            return default_values
 
     @timing_decorator    
     def fit_double_lorentzian(self, method='trf', output_dir=None):
@@ -1383,8 +1493,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\widefield\Imager_ODMR1730322136.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\widefield\Imager_ODMR1730322136.json"
 
     # Initialize analyzer at the start
     analyzer = None
