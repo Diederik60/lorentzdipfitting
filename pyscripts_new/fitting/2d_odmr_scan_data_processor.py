@@ -557,16 +557,16 @@ class ODMRFitChecker:
 
     def _create_control_buttons(self):
         """Create control buttons with consistent layout"""
-        button_width = 0.1
+        button_width = 0.12
         button_height = 0.04
         button_left = 0.85
         
         buttons_config = [
-            ('log_button', 'Toggle Log Scale', 0.29),
-            ('avg_button', 'Toggle Averaging', 0.22),
-            ('range_button', 'Toggle Range', 0.15),
-            ('scale_button', 'Toggle Scale', 0.08)
-        ]
+                ('log_button', 'Toggle Log Scale', 0.16),  
+                ('avg_button', 'Toggle Averaging', 0.11),  
+                ('range_button', 'Toggle Range', 0.06),    
+                ('scale_button', 'Toggle Scale', 0.01)     
+            ]
         
         for attr_name, label, position in buttons_config:
             ax = plt.axes([button_left, position, button_width, button_height])
