@@ -249,9 +249,13 @@ class ODMRFitChecker:
         self.success_rate = np.mean(self.quality_scores >= 0.9) * 100
         self.mean_quality = np.mean(self.quality_scores)
         
-        # Calculate maps
         self.pl_map = np.mean(self.original_data, axis=2)
-        self.raw_contrast = np.ptp(self.original_data, axis=2)
+        # Calculate baseline (maximum value for each pixel)
+        baseline = np.max(self.original_data, axis=2)
+        # Calculate minimum value for each pixel
+        min_val = np.min(self.original_data, axis=2)
+        # Calculate contrast as percentage: (max-min)/max * 100
+        self.raw_contrast = (baseline - min_val) / baseline * 100
 
         # Store the fitting parameters and quality scores separately
         # First 5 columns are fitting parameters, last column is quality score
@@ -277,10 +281,11 @@ class ODMRFitChecker:
                 'cmap': 'viridis',
                 'label': 'PL Intensity (a.u.)'
             },
+            # Replace with:
             'Raw Contrast': {
                 'data': self.raw_contrast,
                 'cmap': 'viridis',
-                'label': 'Raw Contrast (a.u.)'
+                'label': 'Raw Contrast (%)'
             },
             'Fit Contrast': {
                 'data': self.fitting_params[:, :, 1] / self.fitting_params[:, :, 0] * 100,
