@@ -319,9 +319,9 @@ class ODMRFitChecker:
                 'label': 'Fitted Contrast (%)'
             },
             'Peak Splitting': {
-                'data': self.fitting_params[:, :, 4],
+                'data': self.fitting_params[:, :, 4] * 1000,  # Convert from GHz to MHz
                 'cmap': 'magma',
-                'label': 'Peak Splitting (GHz)'
+                'label': 'Peak Splitting (MHz)'  # Update label to show MHz
             },
             'Frequency Shift': {
                 'data': self.fitting_params[:, :, 3],
@@ -1555,8 +1555,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\speed_test\combined_ODMR_scan_1740576118.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\speed_test\combined_ODMR_scan_1740576118.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.json"
 
     # Initialize analyzer at the start
     analyzer = None
