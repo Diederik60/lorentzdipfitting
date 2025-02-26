@@ -151,8 +151,12 @@ def process_pixel_row(args):
     }
     
     for n in range(N):
-        result = ODMRAnalyzer.fit_single_pixel_widefield(data[m, n, :], freq_axis, 
+        result = ODMRAnalyzer.fit_single_pixel(data[m, n, :], freq_axis, 
                                              default_values, method)
+    # # widefield    
+    # for n in range(N):
+    #     result = ODMRAnalyzer.fit_single_pixel_widefield(data[m, n, :], freq_axis, 
+    #                                          default_values, method)
         
         # Calculate fitted curve for quality assessment
         fitted_curve = ODMRAnalyzer.double_dip_func(
@@ -1493,8 +1497,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730052773.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730052773.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.json"
 
     # Initialize analyzer at the start
     analyzer = None
