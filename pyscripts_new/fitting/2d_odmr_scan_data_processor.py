@@ -879,37 +879,53 @@ class ODMRAnalyzer:
     @staticmethod
     def find_outer_dips(freq_axis, pixel_data_norm):
         """Find the outermost dips in a spectrum that may contain multiple dip pairs"""
-        inverted = -pixel_data_norm
+        import numpy as np
+        from scipy.signal import find_peaks, savgol_filter
         
-        # Try different prominence levels to find dips
-        prominence_levels = [0.01, 0.005, 0.002]
-        all_peaks = []
+        # Apply smoothing for more reliable peak detection
+        window_length = min(11, len(pixel_data_norm)//2*2+1)  # Must be odd
+        smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
         
+        # Invert for peak finding
+        inverted = -smoothed_data
+        
+        # Try multiple prominence levels to find all significant dips
+        prominence_levels = [0.015, 0.01, 0.005, 0.003, 0.002, 0.001]
+        
+        # Collect all peaks from different prominence levels
         for prominence in prominence_levels:
-            peaks, properties = find_peaks(inverted, prominence=prominence, 
-                                        width=2, distance=3)
+            peaks, properties = find_peaks(inverted, 
+                                        prominence=prominence,
+                                        width=2,           
+                                        distance=3)        
+            
             if len(peaks) >= 2:
-                # Sort peaks by prominence
-                peak_prominences = properties['prominences']
-                peak_positions = freq_axis[peaks]
+                # Filter out peaks that are too close to the edges
+                freq_range = freq_axis[-1] - freq_axis[0]
+                edge_margin = freq_range * 0.05  # 5% margin
+                
+                # Get frequencies of all peaks
+                peak_freqs = freq_axis[peaks]
                 
                 # Filter peaks that are too close to the edges
-                edge_margin = (freq_axis[-1] - freq_axis[0]) * 0.05
                 valid_peaks = peaks[
-                    (peak_positions > freq_axis[0] + edge_margin) & 
-                    (peak_positions < freq_axis[-1] - edge_margin)
+                    (peak_freqs > freq_axis[0] + edge_margin) & 
+                    (peak_freqs < freq_axis[-1] - edge_margin)
                 ]
                 
                 if len(valid_peaks) >= 2:
-                    # Find the leftmost and rightmost prominent peaks
-                    leftmost_idx = valid_peaks[0]
-                    rightmost_idx = valid_peaks[-1]
+                    # Sort peaks by frequency position to find truly outermost dips
+                    # This is critical for cases with multiple dip pairs
+                    sorted_indices = np.argsort(freq_axis[valid_peaks])
+                    leftmost_idx = valid_peaks[sorted_indices[0]]
+                    rightmost_idx = valid_peaks[sorted_indices[-1]]
                     
-                    # Only accept if the peaks form a reasonable pair
-                    min_separation = (freq_axis[-1] - freq_axis[0]) * 0.1
+                    # Verify minimum separation to avoid noise
+                    min_separation = freq_range * 0.1
                     if freq_axis[rightmost_idx] - freq_axis[leftmost_idx] >= min_separation:
                         return np.array([leftmost_idx, rightmost_idx])
-                    
+        
+        # Return empty array if no valid dips found
         return np.array([])
 
     @staticmethod
@@ -959,7 +975,7 @@ class ODMRAnalyzer:
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
         """
-        Enhanced single pixel fitting with better handling of merged dips
+        Enhanced single pixel fitting with better handling of multiple dips
         """
         # Normalize data
         scale_factor = np.max(np.abs(pixel_data))
@@ -971,65 +987,83 @@ class ODMRAnalyzer:
         window_length = min(11, len(pixel_data_norm)//2*2+1)
         smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
         
-        # Find dips in smoothed data
-        inverted = -smoothed_data
-        
-        # Try to find dips with different prominence levels
-        prominences = [0.01, 0.005, 0.002]
-        all_peaks = []
-        peak_properties = None
-        
-        for prominence in prominences:
-            peaks, properties = find_peaks(inverted, 
-                                        prominence=prominence,
-                                        width=2,
-                                        distance=3)
-            if len(peaks) > 0:
-                all_peaks = peaks
-                peak_properties = properties
-                break
+        # Find outermost dips using enhanced method
+        outer_dips = ODMRAnalyzer.find_outer_dips(freq_axis, pixel_data_norm)
         
         # Initial parameter estimation
         I0_est = np.percentile(pixel_data_norm, 95)
         
-        # Case 1: Multiple distinct peaks found
-        if len(all_peaks) >= 2:
-            # Use the two most prominent peaks
-            peak_prominences = peak_properties['prominences']
-            sorted_indices = np.argsort(peak_prominences)[::-1]
-            main_peaks = all_peaks[sorted_indices[:2]]
-            
-            f_dip_1, f_dip_2 = sorted([freq_axis[idx] for idx in main_peaks])
+        # Case 1: Outermost dips found (primary case)
+        if len(outer_dips) >= 2:
+            # Calculate parameters from the outermost dips
+            f_dip_1, f_dip_2 = sorted([freq_axis[d] for d in outer_dips])
             f_center_est = (f_dip_1 + f_dip_2) / 2
             f_delta_est = f_dip_2 - f_dip_1
-            width_est = 0.006  # typical NV linewidth
-            A_est = np.mean([I0_est - smoothed_data[idx] for idx in main_peaks])
             
-        # Case 2: Single peak found - potential merged dips
-        elif len(all_peaks) == 1:
-            peak_idx = all_peaks[0]
-            peak_width = peak_properties['widths'][0]
-            
-            # Check if this might be a merged peak
-            if peak_width > 6:  # wider than typical single dip
-                f_center_est = freq_axis[peak_idx]
-                f_delta_est = 0.010  # minimum splitting
-                width_est = 0.006
-                A_est = I0_est - smoothed_data[peak_idx]
-            else:
-                # Treat as single dip with minimal splitting
-                f_center_est = freq_axis[peak_idx]
-                f_delta_est = 0.005  # very small splitting
-                width_est = peak_width * (freq_axis[1] - freq_axis[0]) / 4
-                A_est = I0_est - smoothed_data[peak_idx]
+            # Calculate amplitude based on dip depths
+            dip_depths = [I0_est - smoothed_data[d] for d in outer_dips]
+            width_est = 0.006  # Typical NV linewidth
+            A_est = np.mean(dip_depths)
         
-        # Case 3: No peaks found
+        # Case 2: No clear outer dips detected - fallback to regular dip finding
         else:
-            f_center_est = 2.87  # typical zero-field splitting
-            f_delta_est = 0.010
-            width_est = 0.006
-            A_est = 0.1 * np.ptp(pixel_data_norm)
+            # Find dips in smoothed data
+            inverted = -smoothed_data
+            
+            # Try to find dips with different prominence levels
+            prominences = [0.01, 0.005, 0.002]
+            all_peaks = []
+            peak_properties = None
+            
+            for prominence in prominences:
+                peaks, properties = find_peaks(inverted, 
+                                            prominence=prominence,
+                                            width=2,
+                                            distance=3)
+                if len(peaks) > 0:
+                    all_peaks = peaks
+                    peak_properties = properties
+                    break
+            
+            # Case 2a: Multiple distinct peaks found
+            if len(all_peaks) >= 2:
+                # Use the two most prominent peaks
+                peak_prominences = peak_properties['prominences']
+                sorted_indices = np.argsort(peak_prominences)[::-1]
+                main_peaks = all_peaks[sorted_indices[:2]]
+                
+                f_dip_1, f_dip_2 = sorted([freq_axis[idx] for idx in main_peaks])
+                f_center_est = (f_dip_1 + f_dip_2) / 2
+                f_delta_est = f_dip_2 - f_dip_1
+                width_est = 0.006  # typical NV linewidth
+                A_est = np.mean([I0_est - smoothed_data[idx] for idx in main_peaks])
+                
+            # Case 2b: Single peak found - potential merged dips
+            elif len(all_peaks) == 1:
+                peak_idx = all_peaks[0]
+                peak_width = peak_properties['widths'][0]
+                
+                # Check if this might be a merged peak
+                if peak_width > 6:  # wider than typical single dip
+                    f_center_est = freq_axis[peak_idx]
+                    f_delta_est = 0.010  # minimum splitting
+                    width_est = 0.006
+                    A_est = I0_est - smoothed_data[peak_idx]
+                else:
+                    # Treat as single dip with minimal splitting
+                    f_center_est = freq_axis[peak_idx]
+                    f_delta_est = 0.005  # very small splitting
+                    width_est = peak_width * (freq_axis[1] - freq_axis[0]) / 4
+                    A_est = I0_est - smoothed_data[peak_idx]
+            
+            # Case 2c: No peaks found
+            else:
+                f_center_est = 2.87  # typical zero-field splitting
+                f_delta_est = 0.010
+                width_est = 0.006
+                A_est = 0.1 * np.ptp(pixel_data_norm)
         
+        # The rest of the method remains the same as your current implementation
         # Convert amplitude parameters to log space
         epsilon = 1e-10
         log_I0_est = np.log(max(I0_est, epsilon))
@@ -1041,29 +1075,12 @@ class ODMRAnalyzer:
         
         # Set bounds for TRF method
         if method == 'trf':
-            
-            # #40x40 sample
-            # bounds = (
-            #     # Lower bounds
-            #     [np.log(0.01), np.log(1e-3), np.log(0.001), 2.80, 0.003],  # Wider frequency range
-            #     # Upper bounds
-            #     [np.log(10.0), np.log(1.0), np.log(0.1), 2.96, 0.16]      # and splitting
-            # )
-
-            #widefield
+            # Use your existing bounds setup
             bounds = (
                 # Lower bounds
-                [np.log(0.0001),# Allow for very low baseline (previously 0.1)
-                np.log(1e-6),   # Allow for very small amplitudes
-                np.log(0.001),  # Width can stay the same
-                2.75,           # Frequency center
-                0.001],         # Splitting
+                [np.log(0.0001), np.log(1e-6), np.log(0.001), 2.75, 0.001],
                 # Upper bounds
-                [np.log(1000.0),  # Allow for higher intensity regions
-                np.log(100.0),   # Allow for large amplitudes in bright regions
-                np.log(0.1),    # Width upper bound
-                3.00,           # Frequency center
-                0.20]           # Splitting
+                [np.log(1000.0), np.log(100.0), np.log(0.1), 3.00, 0.20]
             )
 
             # Clip initial parameters to bounds
@@ -1143,7 +1160,7 @@ class ODMRAnalyzer:
                 "f_center": np.mean(freq_axis),
                 "f_delta": 0.010
             }
-
+        
     # method for widefield odmr                
     @staticmethod
     def fit_single_pixel_widefield(pixel_data, freq_axis, default_values=None, method='trf'):
@@ -1497,8 +1514,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024-prebonded sample\2D_ODMR_scan_1731707514.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024-prebonded sample\2D_ODMR_scan_1731707514.json"
 
     # Initialize analyzer at the start
     analyzer = None
