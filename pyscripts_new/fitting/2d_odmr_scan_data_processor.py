@@ -206,6 +206,32 @@ def calculate_fit_quality(original_data, fitted_curve):
     
     return max(0, quality_score)  # Ensure non-negative score
 
+def print_performance_metrics(total_processed, start_time, speed_samples=None):
+    """Print performance metrics based on collected data."""
+    end_time = time.time()
+    total_time = end_time - start_time
+    average_speed = total_processed / total_time if total_time > 0 else 0
+    
+    # Calculate max speed if samples are provided
+    if speed_samples and len(speed_samples) > 0:
+        max_speed = max(speed_samples)
+    else:
+        max_speed = average_speed  # Fall back to average if no samples
+    
+    # Print the metrics in a clear format
+    print("\n" + "="*50)
+    print("ODMR PERFORMANCE METRICS")
+    print("="*50)
+    print(f"Average speed: {average_speed:.2f} pixels/second")
+    print(f"Maximum speed: {max_speed:.2f} pixels/second")
+    print(f"Total computation time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+    print("="*50)
+    
+    return {
+        "average_speed": average_speed,
+        "max_speed": max_speed,
+        "total_computation_time": total_time
+    }
 
 class ODMRFitChecker:
     def __init__(self, fitted_params_file, original_data_file, json_params_file):
@@ -1246,7 +1272,7 @@ class ODMRAnalyzer:
     def fit_double_lorentzian(self, method='trf', output_dir=None):
         """
         Parallel version of double Lorentzian fitting
-        Now includes quality assessment for each fit
+        Now includes quality assessment for each fit and performance tracking
         """
         self.start_profiling()
         
@@ -1261,7 +1287,7 @@ class ODMRAnalyzer:
         }
         
         default_values = {"I0": 1.0, "A": 0, "width": 1.0, 
-                         "f_center": np.mean(self.freq_axis), "f_delta": 0.0}
+                        "f_center": np.mean(self.freq_axis), "f_delta": 0.0}
 
         print(f"Processing {M*N} pixels using multiprocessing...")
         
@@ -1270,21 +1296,37 @@ class ODMRAnalyzer:
         
         # Process rows in parallel
         row_args = [(m, self.data, self.freq_axis, default_values, method) 
-                   for m in range(M)]
+                for m in range(M)]
         
         total_processed = 0
         start_time = time.time()
+        speed_samples = []  # Track speed samples for max speed calculation
+        last_sample_time = start_time
+        last_pixel_count = 0
         
         with mp.Pool(processes=num_cores) as pool:
             for m, row_results in tqdm(pool.imap(process_pixel_row, row_args), 
-                                     total=M, 
-                                     desc="Processing rows"):
+                                    total=M, 
+                                    desc="Processing rows"):
                 for key in fitted_params:
                     fitted_params[key][m] = row_results[key]
                 
                 total_processed += N
+                current_time = time.time()
+                
+                # Sample speed every few seconds to find maximum speed
+                elapsed_since_last = current_time - last_sample_time
+                if elapsed_since_last >= 5:  # Sample every 5 seconds
+                    pixels_since_last = total_processed - last_pixel_count
+                    sample_speed = pixels_since_last / elapsed_since_last
+                    speed_samples.append(sample_speed)
+                    
+                    last_sample_time = current_time
+                    last_pixel_count = total_processed
+                
+                # Print progress update periodically
                 if total_processed % (N * 2) == 0:
-                    elapsed_time = time.time() - start_time
+                    elapsed_time = current_time - start_time
                     pixels_per_second = total_processed / elapsed_time
                     remaining_pixels = (M * N) - total_processed
                     remaining_time = remaining_pixels / pixels_per_second
@@ -1292,12 +1334,16 @@ class ODMRAnalyzer:
                     print(f"\nProcessing speed: {pixels_per_second:.2f} pixels/second")
                     print(f"Estimated time remaining: {remaining_time/60:.2f} minutes")
         
+        # Print final performance metrics
+        performance_metrics = print_performance_metrics(total_processed, start_time, speed_samples)
+        
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
             
             base_name = os.path.splitext(os.path.basename(self.data_file))[0]
             fitted_params_file = os.path.join(output_dir, f"{base_name}_fitted_params.npy")
             quality_stats_file = os.path.join(output_dir, f"{base_name}_quality_stats.txt")
+            performance_file = os.path.join(output_dir, f"{base_name}_performance_stats.txt")
             
             # Save the fitted parameters including quality scores
             param_order = ['I0', 'A', 'width', 'f_center', 'f_delta', 'quality_score']
@@ -1310,11 +1356,17 @@ class ODMRAnalyzer:
             mean_quality = np.mean(quality_scores)
             median_quality = np.median(quality_scores)
             
-            with open(quality_stats_file, 'w') as f:
-                f.write(f"Fitting Quality Statistics:\n")
-                f.write(f"Success Rate (score >= 0.9): {success_rate:.1f}%\n")
-                f.write(f"Mean Quality Score: {mean_quality:.3f}\n")
-                f.write(f"Median Quality Score: {median_quality:.3f}\n")
+        with open(quality_stats_file, 'w') as f:
+            f.write(f"Fitting Quality Statistics:\n")
+            f.write(f"Success Rate (score >= 0.9): {success_rate:.1f}%\n")
+            f.write(f"Mean Quality Score: {mean_quality:.3f}\n")
+            f.write(f"Median Quality Score: {median_quality:.3f}\n")
+            
+            # Add performance metrics to the same file
+            f.write(f"\nODMR Fitting Performance Statistics:\n")
+            f.write(f"Average speed: {performance_metrics['average_speed']:.2f} pixels/second\n")
+            f.write(f"Maximum speed: {performance_metrics['max_speed']:.2f} pixels/second\n")
+            f.write(f"Total computation time: {performance_metrics['total_computation_time']:.2f} seconds ({performance_metrics['total_computation_time']/60:.2f} minutes)\n")
             
             # Copy the original files
             new_data_file = os.path.join(output_dir, os.path.basename(self.data_file))
@@ -1327,6 +1379,7 @@ class ODMRAnalyzer:
             print(f"Saved:")
             print(f"  - Fitted parameters: {os.path.basename(fitted_params_file)}")
             print(f"  - Quality statistics: {os.path.basename(quality_stats_file)}")
+            print(f"  - Performance statistics: {os.path.basename(performance_file)}")
             print(f"  - Original data: {os.path.basename(new_data_file)}")
             print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
             
@@ -1502,8 +1555,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\speed_test\combined_ODMR_scan_1740576118.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\speed_test\combined_ODMR_scan_1740576118.json"
 
     # Initialize analyzer at the start
     analyzer = None
