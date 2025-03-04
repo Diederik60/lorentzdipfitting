@@ -1765,16 +1765,132 @@ class ODMRAnalyzer:
                             freq_axis, current_data, center_freq, max_pairs=1
                         )
                         
+                        # For pairs after the first, prevent overlapping with previous pairs
+                        if pair_idx > 1 and filtered_dips:
+                            # Store the original dips before filtering
+                            filtered_dips_original = filtered_dips.copy()
+                            
+                            # Calculate the positions of all previous pairs' dips
+                            exclusion_zones = []
+                            for prev_idx in range(1, pair_idx):
+                                if f"f_delta_{prev_idx}" in result:
+                                    prev_f_delta = result[f"f_delta_{prev_idx}"]
+                                    prev_width1 = result[f"width_{prev_idx}_1"]
+                                    prev_width2 = result[f"width_{prev_idx}_2"]
+                                    
+                                    # Calculate the positions of the previous pair's dips
+                                    prev_f_1 = result["f_center"] - 0.5 * prev_f_delta
+                                    prev_f_2 = result["f_center"] + 0.5 * prev_f_delta
+                                    
+                                    # Define exclusion zones around previous dips (3x width)
+                                    exclusion_width1 = 3.0 * prev_width1
+                                    exclusion_width2 = 3.0 * prev_width2
+                                    
+                                    exclusion_zones.append((prev_f_1 - exclusion_width1, prev_f_1 + exclusion_width1))
+                                    exclusion_zones.append((prev_f_2 - exclusion_width2, prev_f_2 + exclusion_width2))
+                            
+                            # Filter out dips that overlap with exclusion zones
+                            if exclusion_zones:
+                                filtered_dips_new = []
+                                for dip in filtered_dips:
+                                    dip_freq = dip['frequency']
+                                    
+                                    # Check if this dip is inside any exclusion zone
+                                    in_exclusion_zone = False
+                                    for zone_start, zone_end in exclusion_zones:
+                                        if zone_start <= dip_freq <= zone_end:
+                                            in_exclusion_zone = True
+                                            break
+                                    
+                                    if not in_exclusion_zone:
+                                        filtered_dips_new.append(dip)
+                                
+                                # Replace filtered_dips with the non-overlapping ones
+                                filtered_dips = filtered_dips_new
+                                
+                                # Re-form dip pairs with the filtered dips
+                                if filtered_dips:
+                                    # Create a temporary function to find pairs from provided dips
+                                    dip_pairs_new = []
+                                    
+                                    # Sort dips into left and right of center
+                                    left_dips = [dip for dip in filtered_dips if dip['frequency'] < center_freq]
+                                    right_dips = [dip for dip in filtered_dips if dip['frequency'] >= center_freq]
+                                    
+                                    # Sort by distance from center for better pairing
+                                    left_dips.sort(key=lambda x: x['distance_from_center'])
+                                    right_dips.sort(key=lambda x: x['distance_from_center'])
+                                    
+                                    # Match left and right dips to form pairs
+                                    if left_dips and right_dips:
+                                        # Use most prominent dips from each side
+                                        left_dips.sort(key=lambda x: -x['prominence'])
+                                        right_dips.sort(key=lambda x: -x['prominence'])
+                                        dip_pairs_new = [(left_dips[0]['index'], right_dips[0]['index'])]
+                                    elif left_dips:
+                                        # Only left dips available
+                                        left_dips.sort(key=lambda x: -x['prominence'])
+                                        dip_pairs_new = [(left_dips[0]['index'], left_dips[0]['index'])]
+                                    elif right_dips:
+                                        # Only right dips available
+                                        right_dips.sort(key=lambda x: -x['prominence'])
+                                        dip_pairs_new = [(right_dips[0]['index'], right_dips[0]['index'])]
+                                    
+                                    # Use the newly formed pairs if any
+                                    if dip_pairs_new:
+                                        dip_pairs = dip_pairs_new
+                                    else:
+                                        print(f"No non-overlapping dips found for pair {pair_idx}")
+                                        continue  # Skip this pair
+                                else:
+                                    print(f"No non-overlapping dips found for pair {pair_idx}")
+                                    continue  # Skip this pair
+                        
                         if not dip_pairs:
                             print(f"No more significant dips found for pair {pair_idx}")
                             break
-                                
+                        
                         # Estimate parameters for this pair
                         I0_est, pair_params = ODMRAnalyzer.estimate_multi_dip_from_center(
                             freq_axis, current_data, dip_pairs, center_freq, filtered_dips
                         )
                         
-                        # Convert to log space
+                        # For second pair onward, ensure different f_delta
+                        if pair_idx > 1:
+                            # Get all previously fitted f_delta values
+                            prev_f_deltas = [result[f"f_delta_{i}"] for i in range(1, pair_idx) 
+                                            if f"f_delta_{i}" in result]
+                            
+                            # Generate a set of candidate f_delta values across the range
+                            candidate_deltas = [0.01, 0.03, 0.05, 0.08, 0.12, 0.2]
+                            
+                            # Find the candidate that's most different from existing values
+                            best_delta = None
+                            max_diff = -1
+                            
+                            for candidate in candidate_deltas:
+                                # Skip candidates larger than max allowed delta
+                                if candidate > max_delta:
+                                    continue
+                                    
+                                # Calculate minimum difference from existing deltas
+                                min_diff = float('inf')
+                                for prev_delta in prev_f_deltas:
+                                    diff = abs(candidate - prev_delta)
+                                    min_diff = min(min_diff, diff)
+                                
+                                # If this candidate is more distinct than previous best, use it
+                                if min_diff > max_diff:
+                                    max_diff = min_diff
+                                    best_delta = candidate
+                            
+                            # Use the most distinct delta if found
+                            if best_delta is not None:
+                                # Override the estimated f_delta
+                                pair_params[4] = best_delta
+                                print(f"Setting initial f_delta_{pair_idx} = {best_delta} to differ from previous pairs")
+                        
+                        # Convert to log space for parameters that need it
                         epsilon = 1e-10
                         log_I0_est = np.log(max(I0_est, epsilon))
                         log_A_1 = np.log(max(pair_params[0], epsilon))
@@ -1813,9 +1929,13 @@ class ODMRAnalyzer:
                             ]
                             
                             bounds = (lower_bounds, upper_bounds)
+                            
+                            # Clip initial parameters to bounds
+                            for i, (param, (lower, upper)) in enumerate(zip(p0, zip(*bounds))):
+                                p0[i] = np.clip(param, lower, upper)
                         else:
                             bounds = (-np.inf, np.inf)
-                            
+                        
                         # Define single-pair fitting function
                         def single_pair_func(f, log_I0, log_A_1, log_A_2, log_w_1, log_w_2, f_center, f_delta):
                             I0 = np.exp(log_I0)
@@ -1834,6 +1954,19 @@ class ODMRAnalyzer:
                             
                             return I0 - dip_1 - dip_2
                         
+                        # Create weights that emphasize dips and give more importance to f_delta and amplitude
+                        weights = np.ones_like(freq_axis)
+
+                        # Add extra weight around detected dips
+                        for pair in dip_pairs:
+                            for dip_idx in pair:
+                                # Create a window of higher weight around each dip
+                                center = dip_idx
+                                width = 5  # Points on each side
+                                left = max(0, center - width)
+                                right = min(len(weights) - 1, center + width)
+                                weights[left:right+1] = 5.0  # 5x weight in dip regions
+                        
                         # Fit this pair
                         popt, pcov = curve_fit(
                             single_pair_func,
@@ -1842,9 +1975,10 @@ class ODMRAnalyzer:
                             p0=p0,
                             bounds=bounds if method == 'trf' else (-np.inf, np.inf),
                             method=method,
+                            sigma=1/weights,  # Lower sigma means higher weight
                             maxfev=10000,
-                            ftol=1e-5,
-                            xtol=1e-5
+                            ftol=1e-6,
+                            xtol=1e-6
                         )
                         
                         # Store results for this pair
@@ -1875,6 +2009,160 @@ class ODMRAnalyzer:
                     except Exception as e:
                         print(f"Error fitting pair {pair_idx}: {str(e)}")
                         break
+                
+                # After all pairs are fitted individually, do a final joint refinement
+                try:
+                    print("Performing final joint refinement of all pairs...")
+                    
+                    # Count how many pairs we actually fitted
+                    fitted_pairs = 0
+                    for i in range(1, n_pairs + 1):
+                        if f"A_{i}_1" in result:
+                            fitted_pairs += 1
+                    
+                    if fitted_pairs >= 1:
+                        # Build initial parameter vector for joint optimization
+                        joint_p0 = [np.log(result["I0"] / scale_factor)]
+                        
+                        # Add all fitted pairs
+                        for i in range(1, fitted_pairs + 1):
+                            # Check if this pair was successfully fitted
+                            if f"A_{i}_1" in result:
+                                log_A_i_1 = np.log(max(result[f"A_{i}_1"] / scale_factor, epsilon))
+                                log_A_i_2 = np.log(max(result[f"A_{i}_2"] / scale_factor, epsilon))
+                                log_w_i_1 = np.log(max(result[f"width_{i}_1"], epsilon))
+                                log_w_i_2 = np.log(max(result[f"width_{i}_2"], epsilon))
+                                
+                                if i == 1:
+                                    # First pair includes center frequency
+                                    joint_p0.extend([
+                                        log_A_i_1, log_A_i_2, log_w_i_1, log_w_i_2,
+                                        result["f_center"], result[f"f_delta_{i}"]
+                                    ])
+                                else:
+                                    # Subsequent pairs only need f_delta
+                                    joint_p0.extend([
+                                        log_A_i_1, log_A_i_2, log_w_i_1, log_w_i_2,
+                                        result[f"f_delta_{i}"]
+                                    ])
+                        
+                        # Create bounds for joint optimization
+                        if method == 'trf':
+                            joint_lower_bounds = [np.log(0.0001)]  # log_I0
+                            joint_upper_bounds = [np.log(1000.0)]  # log_I0
+                            
+                            center_margin = freq_range * 0.05
+                            f_min = max(freq_axis[0], center_freq - center_margin)
+                            f_max = min(freq_axis[-1], center_freq + center_margin)
+                            
+                            for i in range(1, fitted_pairs + 1):
+                                # Add bounds for each pair's parameters
+                                joint_lower_bounds.extend([
+                                    np.log(1e-6),  # log_A_i_1
+                                    np.log(1e-6),  # log_A_i_2
+                                    np.log(0.001), # log_w_i_1
+                                    np.log(0.001)  # log_w_i_2
+                                ])
+                                
+                                joint_upper_bounds.extend([
+                                    np.log(100.0),  # log_A_i_1
+                                    np.log(100.0),  # log_A_i_2
+                                    np.log(0.15),   # log_w_i_1
+                                    np.log(0.15)    # log_w_i_2
+                                ])
+                                
+                                if i == 1:
+                                    # First pair includes center frequency bounds
+                                    joint_lower_bounds.extend([f_min, 0.005])
+                                    joint_upper_bounds.extend([f_max, max_delta])
+                                else:
+                                    # Subsequent pairs only have f_delta bounds
+                                    joint_lower_bounds.append(0.005)
+                                    joint_upper_bounds.append(max_delta)
+                            
+                            joint_bounds = (joint_lower_bounds, joint_upper_bounds)
+                        else:
+                            joint_bounds = (-np.inf, np.inf)
+                        
+                        # Define multi-dip function for joint fitting
+                        def multi_dip_func_for_joint_fit(x, *params):
+                            return ODMRAnalyzer.multi_dip_func_shared_center(x, *params)
+                        
+                        # Create weights emphasizing dip regions for joint fit
+                        joint_weights = np.ones_like(freq_axis)
+                        
+                        # Add weight around all fitted dips
+                        for i in range(1, fitted_pairs + 1):
+                            if f"f_delta_{i}" in result:
+                                f_c = result["f_center"]
+                                f_d = result[f"f_delta_{i}"]
+                                
+                                # Calculate dip positions
+                                dip1_freq = f_c - 0.5 * f_d
+                                dip2_freq = f_c + 0.5 * f_d
+                                
+                                # Find nearest indices
+                                dip1_idx = np.argmin(np.abs(freq_axis - dip1_freq))
+                                dip2_idx = np.argmin(np.abs(freq_axis - dip2_freq))
+                                
+                                # Add weight around these dips
+                                for dip_idx in [dip1_idx, dip2_idx]:
+                                    width = 5  # Points on each side
+                                    left = max(0, dip_idx - width)
+                                    right = min(len(joint_weights) - 1, dip_idx + width)
+                                    joint_weights[left:right+1] = 5.0  # 5x weight
+                        
+                        # Perform joint optimization
+                        joint_popt, joint_pcov = curve_fit(
+                            multi_dip_func_for_joint_fit,
+                            freq_axis,
+                            pixel_data_norm,
+                            p0=joint_p0,
+                            bounds=joint_bounds if method == 'trf' else (-np.inf, np.inf),
+                            method=method,
+                            sigma=1/joint_weights,
+                            maxfev=10000,
+                            ftol=1e-6,
+                            xtol=1e-6
+                        )
+                        
+                        # Update result with jointly optimized parameters
+                        # Extract baseline
+                        result["I0"] = np.exp(joint_popt[0]) * scale_factor
+                        
+                        # Extract center frequency
+                        result["f_center"] = joint_popt[5]
+                        
+                        # Extract parameters for each pair
+                        param_index = 1  # Start after log_I0
+                        
+                        for i in range(1, fitted_pairs + 1):
+                            if i == 1:
+                                # First pair
+                                result[f"A_{i}_1"] = np.exp(joint_popt[param_index]) * scale_factor
+                                result[f"A_{i}_2"] = np.exp(joint_popt[param_index+1]) * scale_factor
+                                result[f"width_{i}_1"] = np.exp(joint_popt[param_index+2])
+                                result[f"width_{i}_2"] = np.exp(joint_popt[param_index+3])
+                                result[f"f_delta_{i}"] = abs(joint_popt[param_index+5])
+                                param_index += 6  # log_A1, log_A2, log_w1, log_w2, f_c, f_d
+                            else:
+                                # Subsequent pairs
+                                result[f"A_{i}_1"] = np.exp(joint_popt[param_index]) * scale_factor
+                                result[f"A_{i}_2"] = np.exp(joint_popt[param_index+1]) * scale_factor
+                                result[f"width_{i}_1"] = np.exp(joint_popt[param_index+2])
+                                result[f"width_{i}_2"] = np.exp(joint_popt[param_index+3])
+                                result[f"f_delta_{i}"] = abs(joint_popt[param_index+4])
+                                param_index += 5  # log_A1, log_A2, log_w1, log_w2, f_d
+                        
+                        print(f"Joint refinement complete. New parameters:")
+                        print(f"I0 = {result['I0']:.3e}, f_center = {result['f_center']:.4f}")
+                        for i in range(1, fitted_pairs + 1):
+                            print(f"Pair {i}: A1={result[f'A_{i}_1']:.3e}, A2={result[f'A_{i}_2']:.3e}, "
+                                f"w1={result[f'width_{i}_1']:.4f}, w2={result[f'width_{i}_2']:.4f}, "
+                                f"fd={result[f'f_delta_{i}']:.4f}")
+                except Exception as e:
+                    print(f"Joint refinement failed: {str(e)}")
+                    # Continue with individual fit results
                 
                 # Fill in compatibility parameters with first pair if we fit any pairs
                 if "A_1_1" in result:
@@ -1923,6 +2211,7 @@ class ODMRAnalyzer:
                 
                 # Calculate quality score
                 result["quality_score"] = calculate_fit_quality(pixel_data_norm, fitted_curve)
+                print(f"Final quality score: {result['quality_score']:.3f}")
                 
                 return result
                 
@@ -2099,7 +2388,7 @@ class ODMRAnalyzer:
                 result["quality_score"] = quality_score
                 
                 return result
-                    
+
         except Exception as e:
             print(f"Fixed-center fitting failed: {str(e)}")
             traceback.print_exc()  # Add traceback to see full error
@@ -2126,6 +2415,7 @@ class ODMRAnalyzer:
                 default_values["quality_score"] = 0.0
             
             return default_values
+
 
     def fit_multi_lorentzian_with_fixed_center(self, n_pairs=2, method='trf', output_dir=None):
         """
