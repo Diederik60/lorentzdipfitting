@@ -1634,7 +1634,10 @@ class ODMRAnalyzer:
                 # Calculate width in frequency units
                 if right_idx > left_idx:
                     width = (freq_axis[right_idx] - freq_axis[left_idx]) / 2
-                    return max(width, default_width * 0.5)
+                    # Constrain width to reasonable values
+                    width = max(width, 0.002)  # Minimum width of 0.002 GHz
+                    width = min(width, 0.05)   # Maximum width of 0.05 GHz
+                    return width
                 return default_width
             except Exception:
                 return default_width
@@ -1665,7 +1668,7 @@ class ODMRAnalyzer:
             if dip1 == dip2:
                 # Single dip, create two identical dips
                 f_dip = freq_axis[dip1]
-                A_est = max(I0_est - smoothed_data[dip1], 0.01 * I0_est)
+                A_est = max(I0_est - smoothed_data[dip1], 0.01 * I0_est) * 2.0
                 w_est = estimate_width(dip1)
                 
                 # Calculate delta based on distance from center
@@ -1680,8 +1683,8 @@ class ODMRAnalyzer:
                 f_dip_2 = freq_axis[dip2]
                 
                 # Calculate amplitude estimates for each dip
-                A_1_est = max(I0_est - smoothed_data[dip1], 0.01 * I0_est)
-                A_2_est = max(I0_est - smoothed_data[dip2], 0.01 * I0_est)
+                A_1_est = max(I0_est - smoothed_data[dip1], 0.01 * I0_est) * 2.0  # Multiply by 2.0
+                A_2_est = max(I0_est - smoothed_data[dip2], 0.01 * I0_est) * 2.0  # Multiply by 2.0
                 
                 # Estimate width for each dip
                 w_1_est = estimate_width(dip1)
@@ -1922,8 +1925,8 @@ class ODMRAnalyzer:
                                 np.log(1000.0),  # log_I0
                                 np.log(100.0),   # log_A_1
                                 np.log(100.0),   # log_A_2
-                                np.log(0.15),    # log_w_1
-                                np.log(0.15),    # log_w_2
+                                np.log(0.005),    # log_w_1
+                                np.log(0.005),    # log_w_2
                                 f_max,           # f_center
                                 max_delta        # f_delta - use calculated max
                             ]
@@ -2067,8 +2070,8 @@ class ODMRAnalyzer:
                                 joint_upper_bounds.extend([
                                     np.log(100.0),  # log_A_i_1
                                     np.log(100.0),  # log_A_i_2
-                                    np.log(0.15),   # log_w_i_1
-                                    np.log(0.15)    # log_w_i_2
+                                    np.log(0.005),   # log_w_i_1
+                                    np.log(0.005)    # log_w_i_2
                                 ])
                                 
                                 if i == 1:
@@ -2286,8 +2289,8 @@ class ODMRAnalyzer:
                         lower_bounds.extend([
                             np.log(1e-6),  # log_A_i_1
                             np.log(1e-6),  # log_A_i_2
-                            np.log(0.001), # log_w_i_1
-                            np.log(0.001)  # log_w_i_2
+                            np.log(0.002), # log_w_i_1
+                            np.log(0.002)  # log_w_i_2
                         ])
                         
                         # Center frequency and splitting bounds
@@ -2307,8 +2310,8 @@ class ODMRAnalyzer:
                         upper_bounds.extend([
                             np.log(100.0),  # log_A_i_1
                             np.log(100.0),  # log_A_i_2
-                            np.log(0.15),   # log_w_i_1
-                            np.log(0.15)    # log_w_i_2
+                            np.log(0.005),   # log_w_i_1
+                            np.log(0.005)    # log_w_i_2
                         ])
                         
                         # Center frequency and splitting bounds

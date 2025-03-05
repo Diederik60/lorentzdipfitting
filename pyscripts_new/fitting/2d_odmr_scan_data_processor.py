@@ -1555,8 +1555,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1730558912.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.json"
 
     # Initialize analyzer at the start
     analyzer = None
