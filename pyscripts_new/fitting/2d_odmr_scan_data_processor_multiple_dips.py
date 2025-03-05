@@ -1908,26 +1908,24 @@ class ODMRAnalyzer:
                             f_min = max(freq_axis[0], center_freq - center_margin)
                             f_max = min(freq_axis[-1], center_freq + center_margin)
                             
-                            amplitude_scale = np.ptp(pixel_data) / 10  # Rough estimation of scale
-
                             lower_bounds = [
-                                np.log(0.0001),            # log_I0
-                                np.log(amplitude_scale * 0.0001),  # log_A_1 - now scaled to data
-                                np.log(amplitude_scale * 0.0001),  # log_A_2
-                                np.log(0.001),             # log_w_1
-                                np.log(0.001),             # log_w_2
-                                f_min,                     # f_center
-                                0.005                      # f_delta
+                                np.log(0.0001),  # log_I0
+                                np.log(1e-6),    # log_A_1
+                                np.log(1e-6),    # log_A_2
+                                np.log(0.001),   # log_w_1
+                                np.log(0.001),   # log_w_2
+                                f_min,           # f_center
+                                0.005            # f_delta
                             ]
-
+                            
                             upper_bounds = [
-                                np.log(np.max(pixel_data) * 1.5),  # log_I0 - scale to data
-                                np.log(amplitude_scale * 5.0),     # log_A_1 - allow larger amplitude
-                                np.log(amplitude_scale * 5.0),     # log_A_2
-                                np.log(0.15),                      # log_w_1
-                                np.log(0.15),                      # log_w_2
-                                f_max,                             # f_center
-                                max_delta                          # f_delta
+                                np.log(1000.0),  # log_I0
+                                np.log(100.0),   # log_A_1
+                                np.log(100.0),   # log_A_2
+                                np.log(0.15),    # log_w_1
+                                np.log(0.15),    # log_w_2
+                                f_max,           # f_center
+                                max_delta        # f_delta - use calculated max
                             ]
                             
                             bounds = (lower_bounds, upper_bounds)
