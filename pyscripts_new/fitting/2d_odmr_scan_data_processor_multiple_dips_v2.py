@@ -961,6 +961,62 @@ class ODMRAnalyzer:
                 stats.print_stats()
                 print(s.getvalue())
 
+    def plot_pixel_spectrum(self, x, y, smooth=True, fit_result=None):
+        """
+        Plot spectrum from a specific pixel with original and optional fitted data
+        
+        Args:
+            x (int): x-coordinate of pixel
+            y (int): y-coordinate of pixel
+            smooth (bool): Apply Savitzky-Golay smoothing
+            fit_result (dict, optional): Fitted parameters to overlay on plot
+        """
+        spectrum = self.data[x, y, :]
+        
+        fig, ax = plt.subplots(figsize=(12, 7))
+        
+        # Plot original data points
+        ax.scatter(self.freq_axis, spectrum, color='red', alpha=0.5, label='Raw Data Points', zorder=2)
+        
+        if smooth:
+            # Apply Savitzky-Golay filter for smoothing
+            smoothed_spectrum = savgol_filter(spectrum, window_length=7, polyorder=3)
+            ax.plot(self.freq_axis, smoothed_spectrum, 'b-', linewidth=2, label='Smoothed Spectrum', zorder=3)
+        
+        # Find dips
+        inverted = -spectrum
+        peaks, properties = find_peaks(inverted, prominence=0.01)
+        
+        # Plot dip positions
+        for peak in peaks:
+            ax.axvline(x=self.freq_axis[peak], color='g', alpha=0.3, linestyle='--')
+            ax.text(self.freq_axis[peak], spectrum[peak], 
+                f'{self.freq_axis[peak]:.3f} GHz', 
+                rotation=90, verticalalignment='bottom')
+        
+        # Plot fitted curve if parameters are provided
+        if fit_result is not None:
+            # Modify this part to handle scalar parameters
+            fitted_params = [
+                fit_result['I0'],  # Remove [x, y] indexing
+                fit_result['A'], 
+                fit_result['width'], 
+                fit_result['f_center'], 
+                fit_result['f_delta']
+            ]
+            fitted_spectrum = self.double_dip_func(self.freq_axis, *fitted_params)
+            ax.plot(self.freq_axis, fitted_spectrum, 'r--', label='Fitted Curve', linewidth=2)
+        
+        ax.set_xlabel('Frequency (GHz)')
+        ax.set_ylabel('ODMR Signal (a.u.)')
+        ax.set_title(f'ODMR Spectrum at Pixel ({x}, {y})')
+        ax.set_xlim([self.freq_axis[0], self.freq_axis[-1]])
+        ax.grid(True)
+        ax.legend()
+        plt.tight_layout()
+        return fig, ax
+
+
     @staticmethod
     def find_outermost_dips(freq_axis, pixel_data_norm, prominence_threshold=0.005, min_distance_factor=0.02):
         """
@@ -1049,7 +1105,118 @@ class ODMRAnalyzer:
             # Fallback to mean frequency if can't determine reliably
             mean_freq = np.mean(freq_axis)
             return None, None, mean_freq
+
+
+    def plot_contrast_map(self, fitted_params=None):
+        """
+        Create a 2D heat map of the ODMR contrast
+        
+        Args:
+            fitted_params (dict, optional): Use fitted parameters for contrast calculation
+        """
+        # Calculate contrast based on data or fitted parameters
+        if fitted_params is None:
+            contrast_map = np.ptp(self.data, axis=2)
+        else:
+            # Use amplitude from fitted parameters as contrast measure
+            contrast_map = fitted_params['A']
+        
+        fig, ax = plt.subplots(figsize=(10, 8))
+        im = ax.imshow(contrast_map.T, origin='lower', cmap='viridis',
+                      extent=[self.params['x1'], self.params['x2'],
+                             self.params['y1'], self.params['y2']])
+        plt.colorbar(im, ax=ax, label='Contrast')
+        ax.set_xlabel('X Position (mm)')
+        ax.set_ylabel('Y Position (mm)')
+        ax.set_title('ODMR Contrast Map')
+        return fig, ax, contrast_map
+
+    def save_fitted_parameters(self, fitted_params, base_output_dir):
+        """
+        Save fitted parameters and organize related files in a single experiment directory.
+        
+        This method creates a directory structure like:
+        base_output_dir/
+            experiment_[number]/
+                lorentzian_params_[number].npy
+                2D_ODMR_scan_[number].npy
+                2D_ODMR_scan_[number].json
+        """
+        # Create the experiment-specific directory
+        experiment_dir = os.path.join(base_output_dir, f"experiment_{self.experiment_number}")
+        os.makedirs(experiment_dir, exist_ok=True)
+        
+        # Define all file paths within the experiment directory
+        params_file = os.path.join(experiment_dir, f"lorentzian_params_{self.experiment_number}.npy")
+        new_data_file = os.path.join(experiment_dir, os.path.basename(self.data_file))
+        new_json_file = os.path.join(experiment_dir, os.path.basename(self.json_file))
+        
+        # Save the fitted parameters
+        param_order = ['I0', 'A', 'width', 'f_center', 'f_delta']
+        stacked_params = np.stack([fitted_params[param] for param in param_order], axis=-1)
+        np.save(params_file, stacked_params)
+        
+        # Copy the original data files
+        import shutil
+        shutil.copy2(self.data_file, new_data_file)
+        shutil.copy2(self.json_file, new_json_file)
+        
+        print(f"\nOrganized experiment files in: {experiment_dir}")
+        print(f"Saved:")
+        print(f"  - Fitted parameters: {os.path.basename(params_file)}")
+        print(f"  - Original data: {os.path.basename(new_data_file)}")
+        print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
+        print(f"Saved array shape: {stacked_params.shape}")
+        
+        return experiment_dir, params_file
     
+    def analyze_spectrum(self, x, y, fitted_params=None):
+        """
+        Comprehensive spectrum analysis for a specific pixel
+
+        Args:
+            x (int): x-coordinate of pixel
+            y (int): y-coordinate of pixel
+            fitted_params (dict, optional): Pre-computed fitted parameters
+        
+        Returns:
+            dict: Spectrum analysis results
+        """
+        spectrum = self.data[x, y, :]
+        smoothed = savgol_filter(spectrum, window_length=7, polyorder=3)
+        
+        # Find dips
+        inverted = -smoothed
+        peaks, properties = find_peaks(inverted, prominence=0.01)
+        
+        dip_frequencies = self.freq_axis[peaks]
+        dip_depths = spectrum[peaks]
+        
+        # Calculate contrast
+        contrast = np.ptp(spectrum)
+        
+        # Additional analysis using fitted parameters if provided
+        fitted_analysis = {}
+        if fitted_params is not None:
+            # Calculate the row index from the pixel coordinates
+            row = x
+            
+            fitted_analysis = {
+                'I0': fitted_params['I0'][row],
+                'amplitude': fitted_params['A'][row],
+                'width': fitted_params['width'][row],
+                'center_frequency': fitted_params['f_center'][row],
+                'frequency_splitting': fitted_params['f_delta'][row]
+            }
+        
+        return {
+            'dip_frequencies': dip_frequencies,
+            'dip_depths': dip_depths,
+            'contrast': contrast,
+            'num_dips': len(peaks),
+            'fitted_parameters': fitted_analysis
+        }
+
     @staticmethod
     def double_dip_func(f, I0, A, width, f_center, f_delta):
         """
@@ -1057,6 +1224,58 @@ class ODMRAnalyzer:
         Must be static for multiprocessing to work.
         """
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
+
+
+    def optimize_pixel_fitting_with_fixed_center_fixed(self, x, y, method='trf', max_pairs=4):
+        """
+        Interactive optimization of pixel fitting using the fixed center approach.
+        Uses outermost dips to determine center frequency.
+        
+        Args:
+            x (int): x-coordinate of pixel
+            y (int): y-coordinate of pixel
+            method (str): Fitting method ('trf' or 'lm')
+            max_pairs (int): Maximum number of pairs to try
+        
+        Returns:
+            dict: Best fitted parameters
+        """
+        # Get pixel data
+        pixel_data = self.data[x, y, :]
+        
+        # Try fitting with different numbers of pairs
+        results = []
+        
+        for n_pairs in range(1, max_pairs + 1):
+            print(f"Trying fit with {n_pairs} dip pairs...")
+            result = ODMRAnalyzer.fit_single_pixel_with_fixed_center(
+                pixel_data, self.freq_axis, n_pairs=n_pairs, method=method
+            )
+            quality = result['quality_score']
+            print(f"  Quality score: {quality:.4f}")
+            results.append((result, quality))
+            
+            # If we've reached excellent quality, we can stop
+            if quality > 0.95:
+                break
+        
+        # Select the best result
+        best_result, best_quality = max(results, key=lambda x: x[1])
+        
+        print(f"\nBest fit has quality score: {best_quality:.4f} with {(len(best_result) - 3) // 5} pairs")
+        print(f"I0 = {best_result['I0']:.3e}, f_center = {best_result['f_center']:.4f}")
+        
+        for i in range(1, (len(best_result) - 3) // 5 + 1):  # Count pairs based on parameters
+            print(f"Pair {i}: A1={best_result[f'A_{i}_1']:.3e}, A2={best_result[f'A_{i}_2']:.3e}, "
+                f"w1={best_result[f'width_{i}_1']:.4f}, w2={best_result[f'width_{i}_2']:.4f}, "
+                f"fd={best_result[f'f_delta_{i}']:.4f}")
+        
+        # Visualize the result with our new plotting function
+        n_pairs_best = (len(best_result) - 3) // 5
+        fig, ax = self.plot_multi_dip_fit_fixed(x, y, best_result, n_pairs=n_pairs_best)
+        plt.show()
+        
+        return best_result
 
     @staticmethod
     def multi_dip_func_shared_center(f, log_I0, *params):
@@ -1128,6 +1347,49 @@ class ODMRAnalyzer:
                 # Log error but continue with result so far
                 print(f"Error processing pair {i}: {str(e)}")
                 continue
+        
+        return result
+
+    @staticmethod
+    def multi_dip_func_hybrid(f, log_I0, *params):
+        """
+        Generalized n-dip Lorentzian function with hybrid parameter space.
+        I0, amplitudes, and widths are in log space, while f_center and f_delta are linear.
+        
+        Args:
+            f: Frequency values
+            log_I0: Log of baseline intensity
+            *params: List of parameters in format [log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_c, f_d_1, 
+                                                log_A_2_1, log_A_2_2, log_w_2_1, log_w_2_2, f_d_2, ...]
+        
+        Returns:
+            Combined signal with n dips
+        """
+        I0 = np.exp(log_I0)
+        result = I0
+        
+        # Number of dip pairs (each pair has 5 parameters: log_A1, log_A2, log_w1, log_w2, f_d)
+        n_pairs = len(params) // 5
+        f_c = params[4]  # f_center is shared and at index 4
+        
+        for i in range(n_pairs):
+            # Extract parameters for this dip pair
+            A_i_1 = np.exp(params[i*5])
+            A_i_2 = np.exp(params[i*5 + 1])
+            w_i_1 = np.exp(params[i*5 + 2])
+            w_i_2 = np.exp(params[i*5 + 3])
+            f_d_i = params[i*5 + 4]
+            
+            # Calculate dip positions
+            f_1 = f_c - 0.5 * f_d_i
+            f_2 = f_c + 0.5 * f_d_i
+            
+            # Calculate dips
+            dip_1 = A_i_1 / (1 + ((f_1 - f) / w_i_1) ** 2)
+            dip_2 = A_i_2 / (1 + ((f_2 - f) / w_i_2) ** 2)
+            
+            # Subtract dips from baseline
+            result -= (dip_1 + dip_2)
         
         return result
 
@@ -1445,6 +1707,7 @@ class ODMRAnalyzer:
             params = [A_est, A_est, w_est, w_est, f_delta]
         
         return I0_est, params
+
 
     @staticmethod
     def fit_single_pixel_with_fixed_center(pixel_data, freq_axis, n_pairs=3, default_values=None, method='trf', hierarchical=True):
@@ -2330,7 +2593,120 @@ class ODMRAnalyzer:
         self.stop_profiling()
         return None, None
 
- 
+    def plot_multi_dip_fit_fixed(self, x, y, fit_result=None, n_pairs=2):
+        """
+        Plot spectrum with multi-dip fit using the fixed center approach
+        
+        Args:
+            x (int): x-coordinate of pixel
+            y (int): y-coordinate of pixel
+            fit_result (dict, optional): Fitted parameters to overlay
+            n_pairs (int): Number of dip pairs to plot
+        
+        Returns:
+            tuple: (figure, axes)
+        """
+        spectrum = self.data[x, y, :]
+        
+        fig, ax = plt.subplots(figsize=(12, 7))
+        
+        # Plot original data points
+        ax.scatter(self.freq_axis, spectrum, color='red', alpha=0.5, label='Raw Data Points', zorder=2)
+        
+        # Apply Savitzky-Golay filter for smoothing
+        window_length = min(11, len(spectrum)//2*2+1)
+        smoothed_spectrum = savgol_filter(spectrum, window_length=window_length, polyorder=3)
+        ax.plot(self.freq_axis, smoothed_spectrum, 'b-', linewidth=2, label='Smoothed Spectrum', zorder=3)
+        
+        # Find center frequency from outermost dips
+        left_idx, right_idx, center_freq = self.find_outermost_dips(self.freq_axis, smoothed_spectrum)
+        
+        # Find dips based on center frequency and plot them
+        dip_pairs, filtered_dips = self.find_dip_pairs_from_center(
+            self.freq_axis, smoothed_spectrum, center_freq, max_pairs=n_pairs
+        )
+        
+        # Plot detected dips
+        for i, pair in enumerate(dip_pairs):
+            dip1, dip2 = pair
+            for dip_idx in pair:
+                ax.axvline(x=self.freq_axis[dip_idx], color='g', alpha=0.3, linestyle='--')
+                ax.text(self.freq_axis[dip_idx], spectrum[dip_idx], 
+                        f'{self.freq_axis[dip_idx]:.3f} GHz', 
+                        rotation=90, verticalalignment='bottom')
+        
+        # Plot center frequency
+        ax.axvline(x=center_freq, color='black', alpha=0.3, linestyle='-.')
+        ax.text(center_freq, np.min(spectrum), 
+                f'Center: {center_freq:.3f} GHz', 
+                rotation=90, verticalalignment='bottom', color='black')
+        
+        # Plot fitted curve if parameters are provided
+        if fit_result is not None:
+            # Build parameters for the multi dip function
+            I0 = fit_result['I0']
+            f_center = fit_result['f_center']
+            
+            # Parameters list for the fitting function
+            params = []
+            colors = ['r', 'g', 'b', 'c', 'm', 'y']  # Colors for different dip pairs
+            
+            # Plot combined fitted curve
+            fitted_y = np.ones_like(self.freq_axis) * I0
+            
+            for i in range(1, n_pairs+1):
+                # Check if this pair's parameters exist
+                if f"A_{i}_1" in fit_result:
+                    A_i_1 = fit_result[f"A_{i}_1"]
+                    A_i_2 = fit_result[f"A_{i}_2"]
+                    w_i_1 = fit_result[f"width_{i}_1"]
+                    w_i_2 = fit_result[f"width_{i}_2"]
+                    f_d_i = fit_result[f"f_delta_{i}"]
+                    
+                    # Calculate dip positions
+                    f_1 = f_center - 0.5 * f_d_i
+                    f_2 = f_center + 0.5 * f_d_i
+                    
+                    # Calculate individual dips
+                    dip_1 = A_i_1 / (1 + ((f_1 - self.freq_axis) / w_i_1) ** 2)
+                    dip_2 = A_i_2 / (1 + ((f_2 - self.freq_axis) / w_i_2) ** 2)
+                    
+                    # Subtract dips from fitted curve
+                    fitted_y -= (dip_1 + dip_2)
+                    
+                    # Plot individual pair with distinct color
+                    pair_curve = I0 - dip_1 - dip_2
+                    color = colors[i % len(colors)]
+                    ax.plot(self.freq_axis, pair_curve, '--', color=color, alpha=0.5, 
+                            label=f'Pair {i} (Δf = {f_d_i:.3f} GHz)', linewidth=1.5)
+                    
+                    # Mark dip centers
+                    ax.axvline(x=f_1, color=color, alpha=0.2, linestyle=':')
+                    ax.axvline(x=f_2, color=color, alpha=0.2, linestyle=':')
+                    
+                    # Add annotations
+                    ax.text(f_1, I0 * 0.97, f'Dip {i}.1: {f_1:.3f} GHz\nA: {A_i_1:.3e}, w: {w_i_1:.3f}', 
+                            rotation=90, verticalalignment='top', fontsize=8, color=color)
+                    ax.text(f_2, I0 * 0.97, f'Dip {i}.2: {f_2:.3f} GHz\nA: {A_i_2:.3e}, w: {w_i_2:.3f}', 
+                            rotation=90, verticalalignment='top', fontsize=8, color=color)
+            
+            # Plot overall fitted curve
+            ax.plot(self.freq_axis, fitted_y, 'r-', label='Combined Fit', linewidth=2, zorder=4)
+            
+            # Add fit quality information
+            if 'quality_score' in fit_result:
+                ax.text(0.02, 0.02, f'Fit Quality: {fit_result["quality_score"]:.3f}', 
+                        transform=ax.transAxes, fontsize=10, 
+                        bbox=dict(facecolor='white', alpha=0.7))
+        
+        ax.set_xlabel('Frequency (GHz)')
+        ax.set_ylabel('ODMR Signal (a.u.)')
+        ax.set_title(f'Multi-Dip ODMR Spectrum with Fixed Center ({x}, {y})')
+        ax.set_xlim([self.freq_axis[0], self.freq_axis[-1]])
+        ax.grid(True)
+        ax.legend(loc='upper right')
+        plt.tight_layout()
+        return fig, ax
 
 def main():
     data_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.npy"
