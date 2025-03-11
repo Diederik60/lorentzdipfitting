@@ -1133,11 +1133,15 @@ class ODMRAnalyzer:
                     f_offset_i_1 = abs(params[base_idx + 4])  # Left dip offset (positive, will be subtracted)
                     f_offset_i_2 = abs(params[base_idx + 5])  # Right dip offset (positive, will be added)
                 
+                
+                f_offset_i_1 = min(abs(f_offset_i_1), 0.1)  # Cap at 0.1 GHz
+                f_offset_i_2 = min(abs(f_offset_i_2), 0.1)
+
                 # Calculate dip positions using positive offsets as requested
                 # Left dip is at center - offset, right dip is at center + offset
                 f_1 = f_center - f_offset_i_1
                 f_2 = f_center + f_offset_i_2
-                
+                        
                 # Calculate dips
                 dip_1 = A_i_1 / (1 + ((f_1 - f) / w_i_1) ** 2)
                 dip_2 = A_i_2 / (1 + ((f_2 - f) / w_i_2) ** 2)
@@ -1171,7 +1175,7 @@ class ODMRAnalyzer:
         
         # Try progressively lower prominence values to find all potential dips
         if prominence_levels is None:
-            prominence_levels = [0.02, 0.01, 0.005, 0.003, 0.002, 0.001, 0.0005]  # Add even lower levels
+            prominence_levels = [0.1, 0.05 ,0.02, 0.01, 0.005, 0.003, 0.002, 0.001, 0.0005, 0.0002]  # Add even lower levels
         
         # Find all dips at any prominence level
         all_dips = []
@@ -1710,6 +1714,11 @@ class ODMRAnalyzer:
                     # Subsequent pairs don't include center frequency
                     p0.extend([log_A, log_A, log_w, log_w, f_offset_1, f_offset_2])
             
+
+            # After creating p0 and before setting bounds, add:
+            print(f"p0 values: {p0}")  # Debug to see actual initial values
+            
+            # BOUNDS SECTION --------------------------------------------------------------------------------------------------------------------------------------------------------------------------
             # Set bounds for TRF method
             if method == 'trf':
                 # Lower bounds
@@ -1717,7 +1726,7 @@ class ODMRAnalyzer:
                 upper_bounds = [np.log(1000.0)]  # log_I0
                 
                 # Center frequency bounds
-                center_margin = freq_range * 0.05  # 5% margin
+                center_margin = freq_range * 0.1  # 5% margin
                 f_min = max(freq_axis[0], center_freq - center_margin)
                 f_max = min(freq_axis[-1], center_freq + center_margin)
                 
@@ -1750,6 +1759,11 @@ class ODMRAnalyzer:
                             0.05        # Right offset (positive) - maximum
                         ])
                     else:
+                        if i == 1:  # Second pair (index 1)
+                            # Enforce more reasonable initial values for the second pair
+                            f_offset_1 = min(f_offset_1, 0.1)  # Cap at 100 MHz
+                            f_offset_2 = min(f_offset_2, 0.1)  # Cap at 100 MHz
+
                         # Subsequent pairs only have offsets
                         lower_bounds.extend([
                             0.001,      # Left offset - minimum
@@ -1763,6 +1777,11 @@ class ODMRAnalyzer:
                 # Add a check to verify bounds and parameters match
                 print(f"Debug - Parameters: {len(p0)}, Lower bounds: {len(lower_bounds)}, Upper bounds: {len(upper_bounds)}")
                 
+                for i in range(len(p0)):
+                    if i < len(lower_bounds) and i < len(upper_bounds):
+                        # Clip parameter to be within bounds, with a small safety margin
+                        p0[i] = np.clip(p0[i], lower_bounds[i] + 1e-10, upper_bounds[i] - 1e-10)
+
                 if len(p0) != len(lower_bounds) or len(p0) != len(upper_bounds):
                     print("WARNING: Parameter count mismatch, using unbounded optimization")
                     bounds = (-np.inf, np.inf)
@@ -1818,7 +1837,7 @@ class ODMRAnalyzer:
                     result[f"f_delta_{i+1}"] = result[f"f_offset_{i+1}_1"] + result[f"f_offset_{i+1}_2"]
                 else:
                     # Subsequent pairs
-                    base_idx = 7 + (i-1) * 6  # Parameters of first pair (including f_center) plus parameters of previous pairs
+                    base_idx = 7 + 1 + (i-1) * 6  # Parameters of first pair (including f_center) plus parameters of previous pairs
                     result[f"A_{i+1}_1"] = np.exp(popt[base_idx]) * scale_factor
                     result[f"A_{i+1}_2"] = np.exp(popt[base_idx + 1]) * scale_factor
                     result[f"width_{i+1}_1"] = np.exp(popt[base_idx + 2])
