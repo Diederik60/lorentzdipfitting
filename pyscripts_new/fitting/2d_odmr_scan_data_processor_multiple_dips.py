@@ -185,9 +185,9 @@ def print_performance_metrics(total_processed, start_time, speed_samples=None):
         "total_computation_time": total_time
     }
 
-def process_pixel_row_with_fixed_center(args):
+def process_pixel_row_with_asymmetric_dips(args):
     """
-    Process a row of pixels with fixed center approach.
+    Process a row of pixels with asymmetric dips approach.
     
     Args:
         args: Tuple containing (row_idx, data, freq_axis, n_pairs, default_values, method)
@@ -211,6 +211,10 @@ def process_pixel_row_with_fixed_center(args):
         row_results[f"A_{i+1}_2"] = np.zeros(N)
         row_results[f"width_{i+1}_1"] = np.zeros(N)
         row_results[f"width_{i+1}_2"] = np.zeros(N)
+        row_results[f"f_offset_{i+1}_1"] = np.zeros(N)
+        row_results[f"f_offset_{i+1}_2"] = np.zeros(N)
+        row_results[f"f_pos_{i+1}_1"] = np.zeros(N)
+        row_results[f"f_pos_{i+1}_2"] = np.zeros(N)
         row_results[f"f_delta_{i+1}"] = np.zeros(N)
     
     # Add compatibility parameters
@@ -223,7 +227,7 @@ def process_pixel_row_with_fixed_center(args):
         pixel_data = data[m, n, :]
         
         try:
-            result = ODMRAnalyzer.fit_single_pixel_with_fixed_center(
+            result = ODMRAnalyzer.fit_single_pixel_with_asymmetric_dips(
                 pixel_data, freq_axis, n_pairs=n_pairs, 
                 default_values=default_values, method=method
             )
@@ -280,7 +284,7 @@ class ODMRFitChecker:
         
         # Determine number of dip pairs based on parameter count
         param_count = self.fitted_params.shape[2]
-        self.n_pairs = (param_count - 3) // 5  # Subtract 2 for I0, f_center and 1 for quality score
+        self.n_pairs = (param_count - 3) // 9
         
         print(f"Detected {self.n_pairs} dip pairs from parameter count ({param_count})")
         
@@ -311,20 +315,25 @@ class ODMRFitChecker:
         # Create cached averaged data dictionary
         self.averaged_data = {}
         
-        # Define parameter indices for easier reference
+       # Define parameter indices for easier reference
         self.param_indices = {
             'I0': 0,
             'f_center': 1
         }
-        
+
         # Add indices for pair-specific parameters
+        base_idx = 2
         for i in range(1, self.n_pairs + 1):
-            base_idx = 2 + (i-1) * 5
             self.param_indices[f'A_{i}_1'] = base_idx
             self.param_indices[f'A_{i}_2'] = base_idx + 1
             self.param_indices[f'width_{i}_1'] = base_idx + 2
             self.param_indices[f'width_{i}_2'] = base_idx + 3
-            self.param_indices[f'f_delta_{i}'] = base_idx + 4
+            self.param_indices[f'f_offset_{i}_1'] = base_idx + 4
+            self.param_indices[f'f_offset_{i}_2'] = base_idx + 5
+            self.param_indices[f'f_pos_{i}_1'] = base_idx + 6
+            self.param_indices[f'f_pos_{i}_2'] = base_idx + 7
+            self.param_indices[f'f_delta_{i}'] = base_idx + 8
+            base_idx += 9  # 9 parameters per pair in the new model
         
         # Define visualization options
         self.viz_options = {
@@ -425,8 +434,11 @@ class ODMRFitChecker:
         
         return max_splitting
 
-    def multi_lorentzian(self, f, params):
-        """Calculate multi-Lorentzian function with given parameters."""
+    def multi_lorentzian_asymmetric(self, f, params):
+        """
+        Calculate multi-Lorentzian function with given parameters,
+        supporting asymmetric dip positions.
+        """
         # Extract baseline and center frequency
         I0 = params[self.param_indices['I0']]
         f_center = params[self.param_indices['f_center']]
@@ -434,17 +446,35 @@ class ODMRFitChecker:
         # Start with baseline
         result = I0
         
+        # Check if we're using asymmetric parameters (look for f_pos or f_offset params)
+        using_asymmetric = any('f_pos' in key or 'f_offset' in key for key in self.param_indices)
+        
         # Subtract each dip pair
         for i in range(1, self.n_pairs + 1):
             A_1 = params[self.param_indices[f'A_{i}_1']]
             A_2 = params[self.param_indices[f'A_{i}_2']]
             width_1 = params[self.param_indices[f'width_{i}_1']]
             width_2 = params[self.param_indices[f'width_{i}_2']]
-            f_delta = params[self.param_indices[f'f_delta_{i}']]
             
-            # Calculate dip positions
-            f_1 = f_center - 0.5 * f_delta
-            f_2 = f_center + 0.5 * f_delta
+            # Handle symmetric or asymmetric case
+            if using_asymmetric:
+                # For asymmetric case, we have direct positions or offsets
+                if f'f_pos_{i}_1' in self.param_indices:
+                    f_1 = params[self.param_indices[f'f_pos_{i}_1']]
+                    f_2 = params[self.param_indices[f'f_pos_{i}_2']]
+                elif f'f_offset_{i}_1' in self.param_indices:
+                    f_1 = f_center - params[self.param_indices[f'f_offset_{i}_1']]
+                    f_2 = f_center + params[self.param_indices[f'f_offset_{i}_2']]
+                else:
+                    # Fall back to symmetric case if position info not found
+                    f_delta = params[self.param_indices[f'f_delta_{i}']]
+                    f_1 = f_center - 0.5 * f_delta
+                    f_2 = f_center + 0.5 * f_delta
+            else:
+                # For symmetric case
+                f_delta = params[self.param_indices[f'f_delta_{i}']]
+                f_1 = f_center - 0.5 * f_delta
+                f_2 = f_center + 0.5 * f_delta
             
             # Add dips
             result -= A_1 / (1 + ((f_1 - f) / width_1) ** 2)
@@ -537,7 +567,7 @@ class ODMRFitChecker:
         
         # Create fit line
         params = self.fitting_params[self.x_idx, self.y_idx]
-        fitted_curve = self.multi_lorentzian(self.freq_axis, params)
+        fitted_curve = self.multi_lorentzian_asymmetric(self.freq_axis, params)
         self.fit_line, = self.ax_data.plot(self.freq_axis, fitted_curve, 'r-', label='Fit')
         
         # Set initial axis limits
@@ -798,18 +828,21 @@ class ODMRFitChecker:
             self.force_update()
 
     def format_parameter_text(self, params, quality_score):
-        """Format the parameter text for display, supporting multiple dip pairs"""
+        """Format the parameter text for display, supporting asymmetric dips"""
         # Always include I0 and f_center
         param_str = f"I0={params[self.param_indices['I0']]:.3f}, "
         param_str += f"f_c={params[self.param_indices['f_center']]:.3f}\n"
         
-        # Add dip pairs, one per line
+        # Add dip pairs, one per line with asymmetric parameters
         for i in range(1, self.n_pairs + 1):
-            param_str += f"Pair {i}: A1={params[self.param_indices[f'A_{i}_1']]:.3e}, "
-            param_str += f"A2={params[self.param_indices[f'A_{i}_2']]:.3e}, "
-            param_str += f"w1={params[self.param_indices[f'width_{i}_1']]:.3f}, "
-            param_str += f"w2={params[self.param_indices[f'width_{i}_2']]:.3f}, "
-            param_str += f"fd={params[self.param_indices[f'f_delta_{i}']]:.3f}\n"
+            if f'A_{i}_1' in self.param_indices and f'f_offset_{i}_1' in self.param_indices:
+                param_str += f"Pair {i}: "
+                param_str += f"A1={params[self.param_indices[f'A_{i}_1']]:.3e}, "
+                param_str += f"A2={params[self.param_indices[f'A_{i}_2']]:.3e}, "
+                param_str += f"w1={params[self.param_indices[f'width_{i}_1']]:.3f}, "
+                param_str += f"w2={params[self.param_indices[f'width_{i}_2']]:.3f}, "
+                param_str += f"off1={params[self.param_indices[f'f_offset_{i}_1']]:.3f}, "
+                param_str += f"off2={params[self.param_indices[f'f_offset_{i}_2']]:.3f}\n"
         
         # Add quality score
         param_str += f"quality_score={quality_score:.3f}"
@@ -822,7 +855,7 @@ class ODMRFitChecker:
             # Update data plot
             y_data = self.original_data[self.x_idx, self.y_idx]
             params = self.fitting_params[self.x_idx, self.y_idx]
-            fitted_curve = self.multi_lorentzian(self.freq_axis, params)
+            fitted_curve = self.multi_lorentzian_asymmetric(self.freq_axis, params)
             
             self.spectrum_line.set_ydata(y_data)
             self.fit_line.set_ydata(fitted_curve)
@@ -1035,23 +1068,27 @@ class ODMRAnalyzer:
             mean_freq = np.mean(freq_axis)
             return None, None, mean_freq
 
+
     @staticmethod
-    def multi_dip_func_shared_center(f, log_I0, *params):
+    def multi_dip_func_asymmetric(f, log_I0, *params):
         """
-        Generalized n-dip Lorentzian function with a shared center frequency.
-        Each pair has its own splitting (f_delta), but all pairs are centered around the same frequency.
+        Generalized n-dip Lorentzian function with a shared center frequency,
+        but allowing for asymmetric dip positions with positive offsets.
         
         Args:
             f: Frequency values
             log_I0: Log of baseline intensity
-            *params: List of parameters in format [log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_c, f_d_1, 
-                                            log_A_2_1, log_A_2_2, log_w_2_1, log_w_2_2, f_d_2, ...]
+            *params: List of parameters in format [
+                log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_c, f_offset_1_1, f_offset_1_2, 
+                log_A_2_1, log_A_2_2, log_w_2_1, log_w_2_2, f_offset_2_1, f_offset_2_2, 
+                ...
+            ]
         
         Returns:
             Combined signal with n dips
         """
         # Safety check for parameter length
-        if len(params) < 6:  # At minimum need log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_c, f_d_1
+        if len(params) < 7:  # At minimum need log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_c, f_offset_1_1, f_offset_1_2
             # Return baseline if not enough parameters
             return np.exp(log_I0) * np.ones_like(f)
         
@@ -1062,9 +1099,13 @@ class ODMRAnalyzer:
         f_center = params[4]
         
         # Calculate number of pairs based on parameter length
-        # Each pair after the first needs 5 parameters
-        remaining_params = len(params) - 6  # Subtract first pair's params + center frequency
-        additional_pairs = remaining_params // 5
+        # Each pair needs 7 parameters (log_A1, log_A2, log_w1, log_w2, f_c, f_offset_1, f_offset_2)
+        # First pair includes f_center, subsequent pairs don't repeat it
+        first_pair_params = 7  # log_A1, log_A2, log_w1, log_w2, f_c, f_offset_1, f_offset_2
+        additional_pair_params = 6  # log_A1, log_A2, log_w1, log_w2, f_offset_1, f_offset_2
+        
+        remaining_params = len(params) - first_pair_params
+        additional_pairs = remaining_params // additional_pair_params
         n_pairs = 1 + additional_pairs
         
         for i in range(n_pairs):
@@ -1075,24 +1116,27 @@ class ODMRAnalyzer:
                     A_i_2 = np.exp(params[1])
                     w_i_1 = np.exp(params[2])
                     w_i_2 = np.exp(params[3])
-                    f_d_i = abs(params[5])  # Force positive splitting
+                    f_offset_i_1 = abs(params[5])  # Left dip offset (positive, will be subtracted)
+                    f_offset_i_2 = abs(params[6])  # Right dip offset (positive, will be added)
                 else:
                     # Subsequent pairs - parameters start after the center frequency and first pair
-                    base_idx = 6 + (i-1) * 5  # 6 = 5 for first pair params + 1 for center freq
+                    base_idx = first_pair_params + (i-1) * additional_pair_params
                     
                     # Check if we have enough parameters for this pair
-                    if base_idx + 4 >= len(params):
+                    if base_idx + 5 >= len(params):
                         break  # Not enough parameters for this pair, skip it
                     
                     A_i_1 = np.exp(params[base_idx])
                     A_i_2 = np.exp(params[base_idx + 1])
                     w_i_1 = np.exp(params[base_idx + 2])
                     w_i_2 = np.exp(params[base_idx + 3])
-                    f_d_i = abs(params[base_idx + 4])  # Force positive splitting
+                    f_offset_i_1 = abs(params[base_idx + 4])  # Left dip offset (positive, will be subtracted)
+                    f_offset_i_2 = abs(params[base_idx + 5])  # Right dip offset (positive, will be added)
                 
-                # Calculate dip positions using shared center
-                f_1 = f_center - 0.5 * f_d_i
-                f_2 = f_center + 0.5 * f_d_i
+                # Calculate dip positions using positive offsets as requested
+                # Left dip is at center - offset, right dip is at center + offset
+                f_1 = f_center - f_offset_i_1
+                f_2 = f_center + f_offset_i_2
                 
                 # Calculate dips
                 dip_1 = A_i_1 / (1 + ((f_1 - f) / w_i_1) ** 2)
@@ -1332,9 +1376,9 @@ class ODMRAnalyzer:
         params = []
         
         # Function to estimate width from data
-        def estimate_width(idx, default_width=TYPICAL_WIDTH):
+        def estimate_width(idx, default_width=0.006):
             try:
-                # Look for nearest points at half-prominence height
+                # Look for points at half-prominence height
                 half_height = (I0_est + smoothed_data[idx]) / 2
                 left_idx, right_idx = idx, idx
                 
@@ -1349,9 +1393,9 @@ class ODMRAnalyzer:
                 # Calculate width in frequency units
                 if right_idx > left_idx:
                     width = (freq_axis[right_idx] - freq_axis[left_idx]) / 2
-                    # Constrain width to reasonable values
-                    width = max(width, 0.002)  # Minimum width of 0.002 GHz
-                    width = min(width, 0.05)   # Maximum width of 0.05 GHz
+                    # Stricter width constraints
+                    width = max(width, 0.002)  # Minimum width
+                    width = min(width, 0.02)   # Maximum width
                     return width
                 return default_width
             except Exception:
@@ -1423,11 +1467,109 @@ class ODMRAnalyzer:
         
         return I0_est, params
 
-    @staticmethod
-    def fit_single_pixel_with_fixed_center(pixel_data, freq_axis, n_pairs=3, default_values=None, method='trf', hierarchical=True):
+    def plot_multi_dip_asymmetric_fit(self, x, y, fit_result=None, n_pairs=2):
         """
-        ODMR fitting with a fixed center frequency determined from outermost dips.
-        Can use either simultaneous or hierarchical fitting approach.
+        Plot spectrum with multi-dip fit using the asymmetric dips approach
+        
+        Args:
+            x (int): x-coordinate of pixel
+            y (int): y-coordinate of pixel
+            fit_result (dict, optional): Fitted parameters to overlay
+            n_pairs (int): Number of dip pairs to plot
+        
+        Returns:
+            tuple: (figure, axes)
+        """
+        import matplotlib.pyplot as plt
+        from scipy.signal import savgol_filter
+        
+        spectrum = self.data[x, y, :]
+        
+        fig, ax = plt.subplots(figsize=(12, 7))
+        
+        # Plot original data points
+        ax.scatter(self.freq_axis, spectrum, color='red', alpha=0.5, label='Raw Data Points', zorder=2)
+        
+        # Apply Savitzky-Golay filter for smoothing
+        window_length = min(11, len(spectrum)//2*2+1)
+        smoothed_spectrum = savgol_filter(spectrum, window_length=window_length, polyorder=3)
+        ax.plot(self.freq_axis, smoothed_spectrum, 'b-', linewidth=2, label='Smoothed Spectrum', zorder=3)
+        
+        # Plot fitted curve if parameters are provided
+        if fit_result is not None:
+            # Build parameters for the multi dip function
+            I0 = fit_result['I0']
+            f_center = fit_result['f_center']
+            
+            # Add center frequency marker
+            ax.axvline(x=f_center, color='black', alpha=0.3, linestyle='-.')
+            ax.text(f_center, np.min(spectrum), 
+                    f'Center: {f_center:.3f} GHz', 
+                    rotation=90, verticalalignment='bottom', color='black')
+            
+            # Parameters list for the fitting function
+            colors = ['r', 'g', 'b', 'c', 'm', 'y']  # Colors for different dip pairs
+            
+            # Plot combined fitted curve
+            fitted_y = np.ones_like(self.freq_axis) * I0
+            
+            for i in range(1, n_pairs+1):
+                # Check if this pair's parameters exist
+                if f"A_{i}_1" in fit_result and f"f_pos_{i}_1" in fit_result:
+                    A_i_1 = fit_result[f"A_{i}_1"]
+                    A_i_2 = fit_result[f"A_{i}_2"]
+                    w_i_1 = fit_result[f"width_{i}_1"]
+                    w_i_2 = fit_result[f"width_{i}_2"]
+                    f_1 = fit_result[f"f_pos_{i}_1"]
+                    f_2 = fit_result[f"f_pos_{i}_2"]
+                    
+                    # Calculate and plot individual dips
+                    dip_1 = A_i_1 / (1 + ((f_1 - self.freq_axis) / w_i_1) ** 2)
+                    dip_2 = A_i_2 / (1 + ((f_2 - self.freq_axis) / w_i_2) ** 2)
+                    
+                    # Subtract dips from fitted curve
+                    fitted_y -= (dip_1 + dip_2)
+                    
+                    # Plot individual pair with distinct color
+                    pair_curve = I0 - dip_1 - dip_2
+                    color = colors[i % len(colors)]
+                    f_delta = f_2 - f_1  # Total distance between dips
+                    ax.plot(self.freq_axis, pair_curve, '--', color=color, alpha=0.5, 
+                            label=f'Pair {i} (Δf = {f_delta:.3f} GHz)', linewidth=1.5)
+                    
+                    # Mark dip centers
+                    ax.axvline(x=f_1, color=color, alpha=0.2, linestyle=':')
+                    ax.axvline(x=f_2, color=color, alpha=0.2, linestyle=':')
+                    
+                    # Add annotations
+                    ax.text(f_1, I0 * 0.97, f'Dip {i}.1: {f_1:.3f} GHz\nA: {A_i_1:.3e}, w: {w_i_1:.3f}', 
+                            rotation=90, verticalalignment='top', fontsize=8, color=color)
+                    ax.text(f_2, I0 * 0.97, f'Dip {i}.2: {f_2:.3f} GHz\nA: {A_i_2:.3e}, w: {w_i_2:.3f}', 
+                            rotation=90, verticalalignment='top', fontsize=8, color=color)
+            
+            # Plot overall fitted curve
+            ax.plot(self.freq_axis, fitted_y, 'r-', label='Combined Fit', linewidth=2, zorder=4)
+            
+            # Add fit quality information
+            if 'quality_score' in fit_result:
+                ax.text(0.02, 0.02, f'Fit Quality: {fit_result["quality_score"]:.3f}', 
+                        transform=ax.transAxes, fontsize=10, 
+                        bbox=dict(facecolor='white', alpha=0.7))
+        
+        ax.set_xlabel('Frequency (GHz)')
+        ax.set_ylabel('ODMR Signal (a.u.)')
+        ax.set_title(f'Asymmetric Multi-Dip ODMR Spectrum ({x}, {y})')
+        ax.set_xlim([self.freq_axis[0], self.freq_axis[-1]])
+        ax.grid(True)
+        ax.legend(loc='upper right')
+        plt.tight_layout()
+        return fig, ax
+
+    @staticmethod
+    def fit_single_pixel_with_asymmetric_dips(pixel_data, freq_axis, n_pairs=3, default_values=None, method='trf'):
+        """
+        ODMR fitting with a fixed center frequency determined from outermost dips,
+        allowing for asymmetric dip positions around the center.
         
         Args:
             pixel_data: Raw pixel data
@@ -1435,7 +1577,6 @@ class ODMRAnalyzer:
             n_pairs: Number of dip pairs to fit
             default_values: Default parameter values if fitting fails
             method: Fitting method ('trf', 'lm', etc.)
-            hierarchical: If True, use hierarchical approach (fit one pair at a time)
             
         Returns:
             dict: Fitted parameters
@@ -1447,674 +1588,271 @@ class ODMRAnalyzer:
         pixel_data_norm = pixel_data / scale_factor
         
         # Apply smoothing for analysis
+        from scipy.signal import savgol_filter
         window_length = min(11, len(pixel_data_norm)//2*2+1)
         smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
         
         try:
             # Find outermost dips to determine center frequency
-            print("Finding outermost dips...")
             left_idx, right_idx, center_freq = ODMRAnalyzer.find_outermost_dips(freq_axis, smoothed_data)
-            print(f"Found center frequency: {center_freq}")
             
             # Ensure we have a valid center frequency
             if center_freq is None or np.isnan(center_freq):
                 center_freq = np.mean(freq_axis)
-                print(f"Using default center frequency: {center_freq}")
             
-            # Calculate reasonable bounds for f_delta
+            # Calculate reasonable bounds for frequency offsets
             freq_range = freq_axis[-1] - freq_axis[0]
-            max_delta = freq_range * 0.6  # Maximum 60% of frequency range
+            max_offset = freq_range * 0.3  # Maximum 30% of frequency range from center
             
-            if hierarchical:
-                # Initialize result dictionary with the shared center frequency
-                result = {"f_center": center_freq}
-                
-                # Current data to fit (initially the original data)
-                current_data = np.copy(pixel_data_norm)
-                
-                # Fit one pair at a time
-                for pair_idx in range(1, n_pairs + 1):
-                    print(f"Fitting pair {pair_idx}...")
+            # Find dip pairs based on fixed center frequency
+            dip_pairs, filtered_dips = ODMRAnalyzer.find_dip_pairs_from_center(
+                freq_axis, smoothed_data, center_freq, max_pairs=n_pairs
+            )
+            
+            # Initialize result dictionary with the shared center frequency
+            result = {"f_center": center_freq}
+            
+            # Estimate baseline using high percentile
+            I0_est = np.percentile(pixel_data_norm, 98)
+            epsilon = 1e-10
+            log_I0_est = np.log(max(I0_est, epsilon))
+            
+            # Initial parameter vector for asymmetric optimization
+            # [log_I0, log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_center, f_offset_1_1, f_offset_1_2, ...]
+            p0 = [log_I0_est]
+            
+            # Set up parameters for all pairs
+            for i, pair in enumerate(dip_pairs):
+                if len(pair) == 2:
+                    dip1_idx, dip2_idx = pair
                     
-                    try:
-                        # Find the most prominent dips in the current data
-                        dip_pairs, filtered_dips = ODMRAnalyzer.find_dip_pairs_from_center(
-                            freq_axis, current_data, center_freq, max_pairs=1
-                        )
-                        
-                        # For pairs after the first, prevent overlapping with previous pairs
-                        if pair_idx > 1 and filtered_dips:
-                            # Store the original dips before filtering
-                            filtered_dips_original = filtered_dips.copy()
-                            
-                            # Calculate the positions of all previous pairs' dips
-                            exclusion_zones = []
-                            for prev_idx in range(1, pair_idx):
-                                if f"f_delta_{prev_idx}" in result:
-                                    prev_f_delta = result[f"f_delta_{prev_idx}"]
-                                    prev_width1 = result[f"width_{prev_idx}_1"]
-                                    prev_width2 = result[f"width_{prev_idx}_2"]
-                                    
-                                    # Calculate the positions of the previous pair's dips
-                                    prev_f_1 = result["f_center"] - 0.5 * prev_f_delta
-                                    prev_f_2 = result["f_center"] + 0.5 * prev_f_delta
-                                    
-                                    # Define exclusion zones around previous dips (3x width)
-                                    exclusion_width1 = 3.0 * prev_width1
-                                    exclusion_width2 = 3.0 * prev_width2
-                                    
-                                    exclusion_zones.append((prev_f_1 - exclusion_width1, prev_f_1 + exclusion_width1))
-                                    exclusion_zones.append((prev_f_2 - exclusion_width2, prev_f_2 + exclusion_width2))
-                            
-                            # Filter out dips that overlap with exclusion zones
-                            if exclusion_zones:
-                                filtered_dips_new = []
-                                for dip in filtered_dips:
-                                    dip_freq = dip['frequency']
-                                    
-                                    # Check if this dip is inside any exclusion zone
-                                    in_exclusion_zone = False
-                                    for zone_start, zone_end in exclusion_zones:
-                                        if zone_start <= dip_freq <= zone_end:
-                                            in_exclusion_zone = True
-                                            break
-                                    
-                                    if not in_exclusion_zone:
-                                        filtered_dips_new.append(dip)
-                                
-                                # Replace filtered_dips with the non-overlapping ones
-                                filtered_dips = filtered_dips_new
-                                
-                                # Re-form dip pairs with the filtered dips
-                                if filtered_dips:
-                                    # Create a temporary function to find pairs from provided dips
-                                    dip_pairs_new = []
-                                    
-                                    # Sort dips into left and right of center
-                                    left_dips = [dip for dip in filtered_dips if dip['frequency'] < center_freq]
-                                    right_dips = [dip for dip in filtered_dips if dip['frequency'] >= center_freq]
-                                    
-                                    # Sort by distance from center for better pairing
-                                    left_dips.sort(key=lambda x: x['distance_from_center'])
-                                    right_dips.sort(key=lambda x: x['distance_from_center'])
-                                    
-                                    # Match left and right dips to form pairs
-                                    if left_dips and right_dips:
-                                        # Use most prominent dips from each side
-                                        left_dips.sort(key=lambda x: -x['prominence'])
-                                        right_dips.sort(key=lambda x: -x['prominence'])
-                                        dip_pairs_new = [(left_dips[0]['index'], right_dips[0]['index'])]
-                                    elif left_dips:
-                                        # Only left dips available
-                                        left_dips.sort(key=lambda x: -x['prominence'])
-                                        dip_pairs_new = [(left_dips[0]['index'], left_dips[0]['index'])]
-                                    elif right_dips:
-                                        # Only right dips available
-                                        right_dips.sort(key=lambda x: -x['prominence'])
-                                        dip_pairs_new = [(right_dips[0]['index'], right_dips[0]['index'])]
-                                    
-                                    # Use the newly formed pairs if any
-                                    if dip_pairs_new:
-                                        dip_pairs = dip_pairs_new
-                                    else:
-                                        print(f"No non-overlapping dips found for pair {pair_idx}")
-                                        continue  # Skip this pair
-                                else:
-                                    print(f"No non-overlapping dips found for pair {pair_idx}")
-                                    continue  # Skip this pair
-                        
-                        if not dip_pairs:
-                            print(f"No more significant dips found for pair {pair_idx}")
-                            break
-                        
-                        # Estimate parameters for this pair
-                        I0_est, pair_params = ODMRAnalyzer.estimate_multi_dip_from_center(
-                            freq_axis, current_data, dip_pairs, center_freq, filtered_dips
-                        )
-                        
-                        # For second pair onward, ensure different f_delta
-                        if pair_idx > 1:
-                            # Get all previously fitted f_delta values
-                            prev_f_deltas = [result[f"f_delta_{i}"] for i in range(1, pair_idx) 
-                                            if f"f_delta_{i}" in result]
-                            
-                            # Generate a set of candidate f_delta values across the range
-                            candidate_deltas = [0.01, 0.03, 0.05, 0.08, 0.12, 0.2]
-                            
-                            # Find the candidate that's most different from existing values
-                            best_delta = None
-                            max_diff = -1
-                            
-                            for candidate in candidate_deltas:
-                                # Skip candidates larger than max allowed delta
-                                if candidate > max_delta:
-                                    continue
-                                    
-                                # Calculate minimum difference from existing deltas
-                                min_diff = float('inf')
-                                for prev_delta in prev_f_deltas:
-                                    diff = abs(candidate - prev_delta)
-                                    min_diff = min(min_diff, diff)
-                                
-                                # If this candidate is more distinct than previous best, use it
-                                if min_diff > max_diff:
-                                    max_diff = min_diff
-                                    best_delta = candidate
-                            
-                            # Use the most distinct delta if found
-                            if best_delta is not None:
-                                # Override the estimated f_delta
-                                pair_params[4] = best_delta
-                                print(f"Setting initial f_delta_{pair_idx} = {best_delta} to differ from previous pairs")
-                        
-                        # Convert to log space for parameters that need it
-                        epsilon = 1e-10
-                        log_I0_est = np.log(max(I0_est, epsilon))
-                        log_A_1 = np.log(max(pair_params[0], epsilon))
-                        log_A_2 = np.log(max(pair_params[1], epsilon))
-                        log_w_1 = np.log(max(pair_params[2], epsilon))
-                        log_w_2 = np.log(max(pair_params[3], epsilon))
-                        f_delta = min(pair_params[4], max_delta)  # Restrict to reasonable range
-                        
-                        # Initial parameters for single pair fitting
-                        p0 = [log_I0_est, log_A_1, log_A_2, log_w_1, log_w_2, center_freq, f_delta]
-                        
-                        # Set reasonable bounds
-                        if method == 'trf':
-                            center_margin = freq_range * 0.05
-                            f_min = max(freq_axis[0], center_freq - center_margin)
-                            f_max = min(freq_axis[-1], center_freq + center_margin)
-                            
-                            lower_bounds = [
-                                np.log(0.0001),  # log_I0
-                                np.log(1e-6),    # log_A_1
-                                np.log(1e-6),    # log_A_2
-                                np.log(0.001),   # log_w_1
-                                np.log(0.001),   # log_w_2
-                                f_min,           # f_center
-                                0.005            # f_delta
-                            ]
-                            
-                            upper_bounds = [
-                                np.log(1000.0),  # log_I0
-                                np.log(100.0),   # log_A_1
-                                np.log(100.0),   # log_A_2
-                                np.log(0.005),    # log_w_1
-                                np.log(0.005),    # log_w_2
-                                f_max,           # f_center
-                                max_delta        # f_delta - use calculated max
-                            ]
-                            
-                            bounds = (lower_bounds, upper_bounds)
-                            
-                            # Clip initial parameters to bounds
-                            for i, (param, (lower, upper)) in enumerate(zip(p0, zip(*bounds))):
-                                p0[i] = np.clip(param, lower, upper)
-                        else:
-                            bounds = (-np.inf, np.inf)
-                        
-                        # Define single-pair fitting function
-                        def single_pair_func(f, log_I0, log_A_1, log_A_2, log_w_1, log_w_2, f_center, f_delta):
-                            I0 = np.exp(log_I0)
-                            A_1 = np.exp(log_A_1)
-                            A_2 = np.exp(log_A_2)
-                            w_1 = np.exp(log_w_1)
-                            w_2 = np.exp(log_w_2)
-                            
-                            # Calculate dip positions
-                            f_1 = f_center - 0.5 * abs(f_delta)
-                            f_2 = f_center + 0.5 * abs(f_delta)
-                            
-                            # Calculate dips
-                            dip_1 = A_1 / (1 + ((f_1 - f) / w_1) ** 2)
-                            dip_2 = A_2 / (1 + ((f_2 - f) / w_2) ** 2)
-                            
-                            return I0 - dip_1 - dip_2
-                        
-                        # Create weights that emphasize dips and give more importance to f_delta and amplitude
-                        weights = np.ones_like(freq_axis)
-
-                        # Add extra weight around detected dips
-                        for pair in dip_pairs:
-                            for dip_idx in pair:
-                                # Create a window of higher weight around each dip
-                                center = dip_idx
-                                width = 5  # Points on each side
-                                left = max(0, center - width)
-                                right = min(len(weights) - 1, center + width)
-                                weights[left:right+1] = 5.0  # 5x weight in dip regions
-                        
-                        # Fit this pair
-                        popt, pcov = curve_fit(
-                            single_pair_func,
-                            freq_axis,
-                            current_data,
-                            p0=p0,
-                            bounds=bounds if method == 'trf' else (-np.inf, np.inf),
-                            method=method,
-                            sigma=1/weights,  # Lower sigma means higher weight
-                            maxfev=10000,
-                            ftol=1e-6,
-                            xtol=1e-6
-                        )
-                        
-                        # Store results for this pair
-                        if pair_idx == 1:
-                            # For first pair, store I0 and center frequency
-                            result["I0"] = np.exp(popt[0]) * scale_factor
-                            result["f_center"] = popt[5]  # Update center frequency
-                        
-                        # Store pair-specific parameters
-                        result[f"A_{pair_idx}_1"] = np.exp(popt[1]) * scale_factor
-                        result[f"A_{pair_idx}_2"] = np.exp(popt[2]) * scale_factor
-                        result[f"width_{pair_idx}_1"] = np.exp(popt[3])
-                        result[f"width_{pair_idx}_2"] = np.exp(popt[4])
-                        result[f"f_delta_{pair_idx}"] = abs(popt[6])
-                        
-                        # Calculate fitted curve for this pair
-                        fitted_pair = single_pair_func(freq_axis, *popt)
-                        
-                        # Calculate residuals for next iteration
-                        current_data = current_data - (fitted_pair - np.exp(popt[0]))
-                        
-                        # Stop if residuals are small
-                        residual_amplitude = np.ptp(current_data)
-                        if residual_amplitude < 0.01:
-                            print(f"Residuals are small, stopping after {pair_idx} pairs")
-                            break
-                            
-                    except Exception as e:
-                        print(f"Error fitting pair {pair_idx}: {str(e)}")
-                        break
-                
-                # After all pairs are fitted individually, do a final joint refinement
-                try:
-                    print("Performing final joint refinement of all pairs...")
+                    # Calculate frequency offsets from center (as positive values)
+                    f_offset_1 = abs(center_freq - freq_axis[dip1_idx])
+                    f_offset_2 = abs(freq_axis[dip2_idx] - center_freq)
                     
-                    # Count how many pairs we actually fitted
-                    fitted_pairs = 0
-                    for i in range(1, n_pairs + 1):
-                        if f"A_{i}_1" in result:
-                            fitted_pairs += 1
+                    # Estimate amplitudes and widths
+                    A_1_est = max(I0_est - smoothed_data[dip1_idx], 0.01 * I0_est) * 2.0
+                    A_2_est = max(I0_est - smoothed_data[dip2_idx], 0.01 * I0_est) * 2.0
                     
-                    if fitted_pairs >= 1:
-                        # Build initial parameter vector for joint optimization
-                        joint_p0 = [np.log(result["I0"] / scale_factor)]
-                        
-                        # Add all fitted pairs
-                        for i in range(1, fitted_pairs + 1):
-                            # Check if this pair was successfully fitted
-                            if f"A_{i}_1" in result:
-                                log_A_i_1 = np.log(max(result[f"A_{i}_1"] / scale_factor, epsilon))
-                                log_A_i_2 = np.log(max(result[f"A_{i}_2"] / scale_factor, epsilon))
-                                log_w_i_1 = np.log(max(result[f"width_{i}_1"], epsilon))
-                                log_w_i_2 = np.log(max(result[f"width_{i}_2"], epsilon))
-                                
-                                if i == 1:
-                                    # First pair includes center frequency
-                                    joint_p0.extend([
-                                        log_A_i_1, log_A_i_2, log_w_i_1, log_w_i_2,
-                                        result["f_center"], result[f"f_delta_{i}"]
-                                    ])
-                                else:
-                                    # Subsequent pairs only need f_delta
-                                    joint_p0.extend([
-                                        log_A_i_1, log_A_i_2, log_w_i_1, log_w_i_2,
-                                        result[f"f_delta_{i}"]
-                                    ])
-                        
-                        # Create bounds for joint optimization
-                        if method == 'trf':
-                            joint_lower_bounds = [np.log(0.0001)]  # log_I0
-                            joint_upper_bounds = [np.log(1000.0)]  # log_I0
+                    # Estimate widths (simplified method)
+                    def estimate_width(idx, default_width=0.006):
+                        try:
+                            # Look for points at half-prominence
+                            half_height = (I0_est + smoothed_data[idx]) / 2
+                            left_idx, right_idx = idx, idx
                             
-                            center_margin = freq_range * 0.05
-                            f_min = max(freq_axis[0], center_freq - center_margin)
-                            f_max = min(freq_axis[-1], center_freq + center_margin)
-                            
-                            for i in range(1, fitted_pairs + 1):
-                                # Add bounds for each pair's parameters
-                                joint_lower_bounds.extend([
-                                    np.log(1e-6),  # log_A_i_1
-                                    np.log(1e-6),  # log_A_i_2
-                                    np.log(0.001), # log_w_i_1
-                                    np.log(0.001)  # log_w_i_2
-                                ])
+                            # Search left
+                            while left_idx > 0 and smoothed_data[left_idx] < half_height:
+                                left_idx -= 1
                                 
-                                joint_upper_bounds.extend([
-                                    np.log(100.0),  # log_A_i_1
-                                    np.log(100.0),  # log_A_i_2
-                                    np.log(0.005),   # log_w_i_1
-                                    np.log(0.005)    # log_w_i_2
-                                ])
+                            # Search right
+                            while right_idx < len(smoothed_data)-1 and smoothed_data[right_idx] < half_height:
+                                right_idx += 1
                                 
-                                if i == 1:
-                                    # First pair includes center frequency bounds
-                                    joint_lower_bounds.extend([f_min, 0.005])
-                                    joint_upper_bounds.extend([f_max, max_delta])
-                                else:
-                                    # Subsequent pairs only have f_delta bounds
-                                    joint_lower_bounds.append(0.005)
-                                    joint_upper_bounds.append(max_delta)
-                            
-                            joint_bounds = (joint_lower_bounds, joint_upper_bounds)
-                        else:
-                            joint_bounds = (-np.inf, np.inf)
-                        
-                        # Define multi-dip function for joint fitting
-                        def multi_dip_func_for_joint_fit(x, *params):
-                            return ODMRAnalyzer.multi_dip_func_shared_center(x, *params)
-                        
-                        # Create weights emphasizing dip regions for joint fit
-                        joint_weights = np.ones_like(freq_axis)
-                        
-                        # Add weight around all fitted dips
-                        for i in range(1, fitted_pairs + 1):
-                            if f"f_delta_{i}" in result:
-                                f_c = result["f_center"]
-                                f_d = result[f"f_delta_{i}"]
-                                
-                                # Calculate dip positions
-                                dip1_freq = f_c - 0.5 * f_d
-                                dip2_freq = f_c + 0.5 * f_d
-                                
-                                # Find nearest indices
-                                dip1_idx = np.argmin(np.abs(freq_axis - dip1_freq))
-                                dip2_idx = np.argmin(np.abs(freq_axis - dip2_freq))
-                                
-                                # Add weight around these dips
-                                for dip_idx in [dip1_idx, dip2_idx]:
-                                    width = 5  # Points on each side
-                                    left = max(0, dip_idx - width)
-                                    right = min(len(joint_weights) - 1, dip_idx + width)
-                                    joint_weights[left:right+1] = 5.0  # 5x weight
-                        
-                        # Perform joint optimization
-                        joint_popt, joint_pcov = curve_fit(
-                            multi_dip_func_for_joint_fit,
-                            freq_axis,
-                            pixel_data_norm,
-                            p0=joint_p0,
-                            bounds=joint_bounds if method == 'trf' else (-np.inf, np.inf),
-                            method=method,
-                            sigma=1/joint_weights,
-                            maxfev=10000,
-                            ftol=1e-6,
-                            xtol=1e-6
-                        )
-                        
-                        # Update result with jointly optimized parameters
-                        # Extract baseline
-                        result["I0"] = np.exp(joint_popt[0]) * scale_factor
-                        
-                        # Extract center frequency
-                        result["f_center"] = joint_popt[5]
-                        
-                        # Extract parameters for each pair
-                        param_index = 1  # Start after log_I0
-                        
-                        for i in range(1, fitted_pairs + 1):
-                            if i == 1:
-                                # First pair
-                                result[f"A_{i}_1"] = np.exp(joint_popt[param_index]) * scale_factor
-                                result[f"A_{i}_2"] = np.exp(joint_popt[param_index+1]) * scale_factor
-                                result[f"width_{i}_1"] = np.exp(joint_popt[param_index+2])
-                                result[f"width_{i}_2"] = np.exp(joint_popt[param_index+3])
-                                result[f"f_delta_{i}"] = abs(joint_popt[param_index+5])
-                                param_index += 6  # log_A1, log_A2, log_w1, log_w2, f_c, f_d
-                            else:
-                                # Subsequent pairs
-                                result[f"A_{i}_1"] = np.exp(joint_popt[param_index]) * scale_factor
-                                result[f"A_{i}_2"] = np.exp(joint_popt[param_index+1]) * scale_factor
-                                result[f"width_{i}_1"] = np.exp(joint_popt[param_index+2])
-                                result[f"width_{i}_2"] = np.exp(joint_popt[param_index+3])
-                                result[f"f_delta_{i}"] = abs(joint_popt[param_index+4])
-                                param_index += 5  # log_A1, log_A2, log_w1, log_w2, f_d
-                        
-                        print(f"Joint refinement complete. New parameters:")
-                        print(f"I0 = {result['I0']:.3e}, f_center = {result['f_center']:.4f}")
-                        for i in range(1, fitted_pairs + 1):
-                            print(f"Pair {i}: A1={result[f'A_{i}_1']:.3e}, A2={result[f'A_{i}_2']:.3e}, "
-                                f"w1={result[f'width_{i}_1']:.4f}, w2={result[f'width_{i}_2']:.4f}, "
-                                f"fd={result[f'f_delta_{i}']:.4f}")
-                except Exception as e:
-                    print(f"Joint refinement failed: {str(e)}")
-                    # Continue with individual fit results
-                
-                # Fill in compatibility parameters with first pair if we fit any pairs
-                if "A_1_1" in result:
-                    result["A"] = (result["A_1_1"] + result["A_1_2"]) / 2
-                    result["width"] = (result["width_1_1"] + result["width_1_2"]) / 2
-                    result["f_delta"] = result["f_delta_1"]
+                            # Calculate width in frequency units
+                            if right_idx > left_idx:
+                                width = (freq_axis[right_idx] - freq_axis[left_idx]) / 2
+                                width = max(width, 0.002)  # Minimum width
+                                width = min(width, 0.05)   # Maximum width
+                                return width
+                            return default_width
+                        except Exception:
+                            return default_width
+                    
+                    w_1_est = estimate_width(dip1_idx)
+                    w_2_est = estimate_width(dip2_idx)
                 else:
-                    # No pairs were successfully fit, return default values
-                    result = {
-                        "I0": np.mean(pixel_data),
-                        "f_center": center_freq,
-                        "A": np.ptp(pixel_data) * 0.1,
-                        "width": 0.006,
-                        "f_delta": 0.010,
-                    }
+                    # Handle case of incomplete pair or bad detection
+                    dip_idx = pair[0]
                     
-                    # Add pair-specific defaults
-                    for i in range(n_pairs):
-                        result[f"A_{i+1}_1"] = result["A"]
-                        result[f"A_{i+1}_2"] = result["A"]
-                        result[f"width_{i+1}_1"] = result["width"]
-                        result[f"width_{i+1}_2"] = result["width"]
-                        result[f"f_delta_{i+1}"] = result["f_delta"] + i * 0.005
+                    # Create symmetric pair around center (with positive offsets)
+                    f_offset_1 = 0.01  # Left dip offset 
+                    f_offset_2 = 0.01  # Right dip offset
+                    
+                    # Use same amplitude and width estimates for both dips
+                    A_est = max(I0_est - smoothed_data[dip_idx], 0.01 * I0_est) * 2.0
+                    A_1_est = A_2_est = A_est
+                    
+                    w_est = estimate_width(dip_idx)
+                    w_1_est = w_2_est = w_est
                 
-                # Calculate overall fit quality
-                fitted_curve = np.ones_like(freq_axis) * result["I0"] / scale_factor
+                # Convert to log space
+                log_A_1 = np.log(max(A_1_est, epsilon))
+                log_A_2 = np.log(max(A_2_est, epsilon))
+                log_w_1 = np.log(max(w_1_est, epsilon))
+                log_w_2 = np.log(max(w_2_est, epsilon))
                 
-                # Subtract all fitted pairs
-                for i in range(1, n_pairs + 1):
-                    if f"A_{i}_1" in result:
-                        A_i_1 = result[f"A_{i}_1"] / scale_factor
-                        A_i_2 = result[f"A_{i}_2"] / scale_factor
-                        w_i_1 = result[f"width_{i}_1"]
-                        w_i_2 = result[f"width_{i}_2"]
-                        f_d_i = result[f"f_delta_{i}"]
-                        f_c = result["f_center"]
-                        
-                        # Calculate dip positions
-                        f_1 = f_c - 0.5 * f_d_i
-                        f_2 = f_c + 0.5 * f_d_i
-                        
-                        # Calculate and subtract dips
-                        dip_1 = A_i_1 / (1 + ((f_1 - freq_axis) / w_i_1) ** 2)
-                        dip_2 = A_i_2 / (1 + ((f_2 - freq_axis) / w_i_2) ** 2)
-                        fitted_curve -= (dip_1 + dip_2)
-                
-                # Calculate quality score
-                result["quality_score"] = calculate_fit_quality(pixel_data_norm, fitted_curve)
-                print(f"Final quality score: {result['quality_score']:.3f}")
-                
-                return result
-                
-            else:
-                # Original simultaneous fitting approach
-                # Find dip pairs based on fixed center frequency
-                print("Finding dip pairs...")
-                dip_pairs, filtered_dips = ODMRAnalyzer.find_dip_pairs_from_center(
-                    freq_axis, smoothed_data, center_freq, max_pairs=n_pairs
-                )
-                print(f"Found {len(dip_pairs)} dip pairs")
-                
-                # Estimate initial parameters using fixed center frequency
-                print("Estimating parameters...")
-                I0_est, pair_params = ODMRAnalyzer.estimate_multi_dip_from_center(
-                    freq_axis, smoothed_data, dip_pairs, center_freq, filtered_dips
-                )
-                print(f"Estimated I0: {I0_est}, params length: {len(pair_params)}")
-                
-                # Ensure we have enough parameters for requested n_pairs
-                while len(pair_params) < 5 * n_pairs:
-                    # Add default parameters for additional pairs
-                    A_est = 0.05 * np.ptp(pixel_data_norm)
-                    w_est = 0.006
-                    f_delta = 0.010 + (len(pair_params) // 5) * 0.005  # Slightly different spacing
-                    
-                    pair_params.extend([A_est, A_est, w_est, w_est, f_delta])
-                
-                # Convert to log space for parameters that need it
-                epsilon = 1e-10
-                log_I0_est = np.log(max(I0_est, epsilon))
-                
-                # Initial parameter vector: [log_I0, log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, f_center, f_d_1, ...]
-                p0 = [log_I0_est]
-
-                # First pair includes amplitudes, widths, center frequency, and delta
-                log_A_1_1 = np.log(max(pair_params[0], epsilon))
-                log_A_1_2 = np.log(max(pair_params[1], epsilon))
-                log_w_1_1 = np.log(max(pair_params[2], epsilon))
-                log_w_1_2 = np.log(max(pair_params[3], epsilon))
-                f_delta_1 = min(pair_params[4], max_delta)  # Restrict to reasonable range
-
-                # Add first pair parameters with center frequency
-                p0.extend([log_A_1_1, log_A_1_2, log_w_1_1, log_w_1_2, center_freq, f_delta_1])
-
-                # Add subsequent pairs
-                for i in range(1, n_pairs):
-                    idx = i * 5  # Each pair has 5 parameters
-                    
-                    # Convert amplitude and width to log space
-                    log_A_i_1 = np.log(max(pair_params[idx], epsilon))
-                    log_A_i_2 = np.log(max(pair_params[idx + 1], epsilon))
-                    log_w_i_1 = np.log(max(pair_params[idx + 2], epsilon))
-                    log_w_i_2 = np.log(max(pair_params[idx + 3], epsilon))
-                    f_delta_i = min(pair_params[idx + 4], max_delta)  # Restrict to reasonable range
-                    
-                    # Each subsequent pair only adds 5 parameters (no center frequency)
-                    p0.extend([log_A_i_1, log_A_i_2, log_w_i_1, log_w_i_2, f_delta_i])
-                                        
-                # Set bounds for TRF method
-                if method == 'trf':
-                    # Lower bounds
-                    lower_bounds = [np.log(0.0001)]  # log_I0
-                    
-                    # Narrow bounds for center frequency since we're confident about it
-                    center_margin = (freq_axis[-1] - freq_axis[0]) * 0.05  # 5% margin
-                    f_min = max(np.min(freq_axis), center_freq - center_margin)
-                    f_max = min(np.max(freq_axis), center_freq + center_margin)
-                    
-                    for i in range(n_pairs):
-                        # Amplitude and width bounds
-                        lower_bounds.extend([
-                            np.log(1e-6),  # log_A_i_1
-                            np.log(1e-6),  # log_A_i_2
-                            np.log(0.002), # log_w_i_1
-                            np.log(0.002)  # log_w_i_2
-                        ])
-                        
-                        # Center frequency and splitting bounds
-                        if i == 0:
-                            lower_bounds.extend([
-                                f_min,      # Center frequency with tight bounds
-                                0.005       # Minimum splitting
-                            ])
-                        else:
-                            lower_bounds.append(0.005)  # Minimum splitting for other pairs
-                    
-                    # Upper bounds
-                    upper_bounds = [np.log(1000.0)]  # log_I0 
-                    
-                    for i in range(n_pairs):
-                        # Amplitude and width bounds
-                        upper_bounds.extend([
-                            np.log(100.0),  # log_A_i_1
-                            np.log(100.0),  # log_A_i_2
-                            np.log(0.005),   # log_w_i_1
-                            np.log(0.005)    # log_w_i_2
-                        ])
-                        
-                        # Center frequency and splitting bounds
-                        if i == 0:
-                            upper_bounds.extend([
-                                f_max,     # Center frequency with tight bounds
-                                max_delta  # Maximum splitting - use calculated max
-                            ])
-                        else:
-                            upper_bounds.append(max_delta)  # Maximum splitting for other pairs
-                    
-                    bounds = (lower_bounds, upper_bounds)
-                    
-                    # Clip initial parameters to bounds
-                    for i, (param, (lower, upper)) in enumerate(zip(p0, zip(*bounds))):
-                        p0[i] = np.clip(param, lower, upper)
+                if i == 0:
+                    # First pair includes center frequency
+                    p0.extend([log_A_1, log_A_2, log_w_1, log_w_2, center_freq, f_offset_1, f_offset_2])
                 else:
-                    bounds = (-np.inf, np.inf)
+                    # Subsequent pairs include only their own parameters
+                    p0.extend([log_A_1, log_A_2, log_w_1, log_w_2, f_offset_1, f_offset_2])
+            
+            # Ensure we have enough parameters for requested n_pairs
+            while len(p0) < 7 + (n_pairs - 1) * 6:
+                # Add default parameters for missing pairs
+                pair_idx = (len(p0) - 1) // 6  # How many pairs we've added so far
                 
-                # Prepare function for fitting with appropriate parameters
-                def fitting_function(x, *params):
-                    return ODMRAnalyzer.multi_dip_func_shared_center(x, *params)
+                # Create default values with increasing spacing
+                A_est = 0.05 * np.ptp(pixel_data_norm)
+                w_est = 0.006
+                f_offset_1 = 0.01 + 0.005 * pair_idx  # Left dip offset
+                f_offset_2 = 0.01 + 0.005 * pair_idx  # Right dip offset
                 
-                # Perform fitting
-                print("Starting curve fitting...")
-                print(f"Initial parameters: {p0}")
+                log_A = np.log(max(A_est, epsilon))
+                log_w = np.log(max(w_est, epsilon))
                 
-                popt, pcov = curve_fit(
-                    fitting_function,
-                    freq_axis,
-                    pixel_data_norm,
-                    p0=p0,
-                    bounds=bounds if method == 'trf' else (-np.inf, np.inf),
-                    method=method,
-                    maxfev=10000,  # Increase max iterations
-                    ftol=1e-5,
-                    xtol=1e-5
-                )
+                if pair_idx == 0:
+                    # First pair includes center frequency
+                    p0.extend([log_A, log_A, log_w, log_w, center_freq, f_offset_1, f_offset_2])
+                else:
+                    # Subsequent pairs don't include center frequency
+                    p0.extend([log_A, log_A, log_w, log_w, f_offset_1, f_offset_2])
+            
+            # Set bounds for TRF method
+            if method == 'trf':
+                # Lower bounds
+                lower_bounds = [np.log(0.0001)]  # log_I0
+                upper_bounds = [np.log(1000.0)]  # log_I0
                 
-                # Calculate fit quality
-                fitted_curve = fitting_function(freq_axis, *popt)
-                quality_score = calculate_fit_quality(pixel_data_norm, fitted_curve)
+                # Center frequency bounds
+                center_margin = freq_range * 0.05  # 5% margin
+                f_min = max(freq_axis[0], center_freq - center_margin)
+                f_max = min(freq_axis[-1], center_freq + center_margin)
                 
-                # Process results into a more usable format
-                result = {}
-                
-                # Extract baseline
-                result["I0"] = np.exp(popt[0]) * scale_factor
-                
-                # Extract center frequency (index 5 after log_I0 and first pair's amplitude/width params)
-                result["f_center"] = popt[5]
-                
-                # Extract parameters for each pair
+                # Add bounds for each pair with proper parameters
                 for i in range(n_pairs):
-                    if i == 0:
-                        # First pair includes the center frequency
-                        base_idx = 1  # Start after log_I0
-                        f_d_idx = 6   # After center frequency
-                    else:
-                        # Subsequent pairs
-                        base_idx = 6 + (i-1) * 5  # f_center + params for previous pairs
-                        f_d_idx = base_idx + 4    # Last parameter in the group
+                    # Add amplitude and width bounds for both dips
+                    lower_bounds.extend([
+                        np.log(1e-6),  # log_A_i_1
+                        np.log(1e-6),  # log_A_i_2
+                        np.log(0.002), # log_w_i_1
+                        np.log(0.002)  # log_w_i_2
+                    ])
+                    upper_bounds.extend([
+                        np.log(100.0),  # log_A_i_1
+                        np.log(100.0),  # log_A_i_2
+                        np.log(0.02),   # log_w_i_1 - tighter constraint
+                        np.log(0.02)    # log_w_i_2 - tighter constraint
+                    ])
                     
+                    if i == 0:
+                        # First pair includes center frequency and offsets
+                        lower_bounds.extend([
+                            f_min,      # Center frequency
+                            0.001,      # Left offset (positive) - minimum 
+                            0.001       # Right offset (positive) - minimum
+                        ])
+                        upper_bounds.extend([
+                            f_max,      # Center frequency
+                            0.05,       # Left offset (positive) - maximum
+                            0.05        # Right offset (positive) - maximum
+                        ])
+                    else:
+                        # Subsequent pairs only have offsets
+                        lower_bounds.extend([
+                            0.001,      # Left offset - minimum
+                            0.001       # Right offset - minimum
+                        ])
+                        upper_bounds.extend([
+                            0.05,       # Left offset - maximum
+                            0.05        # Right offset - maximum
+                        ])
+                
+                # Add a check to verify bounds and parameters match
+                print(f"Debug - Parameters: {len(p0)}, Lower bounds: {len(lower_bounds)}, Upper bounds: {len(upper_bounds)}")
+                
+                if len(p0) != len(lower_bounds) or len(p0) != len(upper_bounds):
+                    print("WARNING: Parameter count mismatch, using unbounded optimization")
+                    bounds = (-np.inf, np.inf)
+                else:
+                    bounds = (lower_bounds, upper_bounds)
+            
+            # Perform fitting
+            # Create weights emphasizing dip regions
+            weights = np.ones_like(freq_axis)
+            for pair in dip_pairs:
+                for dip_idx in pair:
+                    width = 5  # Points on each side
+                    left = max(0, dip_idx - width)
+                    right = min(len(weights) - 1, dip_idx + width)
+                    weights[left:right+1] = 5.0  # 5x weight in dip regions
+            
+            # Fit the asymmetric model
+            popt, pcov = curve_fit(
+                ODMRAnalyzer.multi_dip_func_asymmetric,
+                freq_axis,
+                pixel_data_norm,
+                p0=p0,
+                bounds=bounds if method == 'trf' else (-np.inf, np.inf),
+                method=method,
+                sigma=1/weights,
+                maxfev=10000,
+                ftol=1e-6,
+                xtol=1e-6
+            )
+            
+            # Process results into a more usable format
+            result = {}
+            
+            # Extract baseline and center frequency
+            result["I0"] = np.exp(popt[0]) * scale_factor
+            result["f_center"] = popt[5]  # Center frequency is always at index 5
+            
+            # Extract parameters for each pair
+            for i in range(n_pairs):
+                if i == 0:
+                    # First pair
+                    base_idx = 1  # Start after log_I0
                     result[f"A_{i+1}_1"] = np.exp(popt[base_idx]) * scale_factor
                     result[f"A_{i+1}_2"] = np.exp(popt[base_idx + 1]) * scale_factor
                     result[f"width_{i+1}_1"] = np.exp(popt[base_idx + 2])
                     result[f"width_{i+1}_2"] = np.exp(popt[base_idx + 3])
-                    result[f"f_delta_{i+1}"] = abs(popt[f_d_idx])  # Force positive delta
-                
-                # For compatibility with double-dip code
-                if n_pairs >= 1:
-                    result["A"] = (result["A_1_1"] + result["A_1_2"]) / 2
-                    result["width"] = (result["width_1_1"] + result["width_1_2"]) / 2
-                    result["f_delta"] = result["f_delta_1"]
-                
-                # Add quality score
-                result["quality_score"] = quality_score
-                
-                return result
-
+                    result[f"f_offset_{i+1}_1"] = abs(popt[base_idx + 5])  # Left offset (positive)
+                    result[f"f_offset_{i+1}_2"] = abs(popt[base_idx + 6])  # Right offset (positive)
+                    # Calculate actual positions
+                    result[f"f_pos_{i+1}_1"] = result["f_center"] - result[f"f_offset_{i+1}_1"]
+                    result[f"f_pos_{i+1}_2"] = result["f_center"] + result[f"f_offset_{i+1}_2"]
+                    # Calculate total splitting (for compatibility)
+                    result[f"f_delta_{i+1}"] = result[f"f_offset_{i+1}_1"] + result[f"f_offset_{i+1}_2"]
+                else:
+                    # Subsequent pairs
+                    base_idx = 7 + (i-1) * 6  # Parameters of first pair (including f_center) plus parameters of previous pairs
+                    result[f"A_{i+1}_1"] = np.exp(popt[base_idx]) * scale_factor
+                    result[f"A_{i+1}_2"] = np.exp(popt[base_idx + 1]) * scale_factor
+                    result[f"width_{i+1}_1"] = np.exp(popt[base_idx + 2])
+                    result[f"width_{i+1}_2"] = np.exp(popt[base_idx + 3])
+                    result[f"f_offset_{i+1}_1"] = abs(popt[base_idx + 4])  # Left offset (positive)
+                    result[f"f_offset_{i+1}_2"] = abs(popt[base_idx + 5])  # Right offset (positive)
+                    # Calculate actual positions
+                    result[f"f_pos_{i+1}_1"] = result["f_center"] - result[f"f_offset_{i+1}_1"]
+                    result[f"f_pos_{i+1}_2"] = result["f_center"] + result[f"f_offset_{i+1}_2"]
+                    # Calculate total splitting (for compatibility)
+                    result[f"f_delta_{i+1}"] = result[f"f_offset_{i+1}_1"] + result[f"f_offset_{i+1}_2"]
+            
+            # For compatibility with double-dip code
+            if n_pairs >= 1:
+                result["A"] = (result["A_1_1"] + result["A_1_2"]) / 2
+                result["width"] = (result["width_1_1"] + result["width_1_2"]) / 2
+                result["f_delta"] = result["f_delta_1"]
+            
+            # Calculate fit quality
+            fitted_curve = ODMRAnalyzer.multi_dip_func_asymmetric(freq_axis, np.log(result["I0"] / scale_factor), *popt[1:])
+            result["quality_score"] = calculate_fit_quality(pixel_data_norm, fitted_curve)
+            
+            return result
+            
         except Exception as e:
-            print(f"Fixed-center fitting failed: {str(e)}")
-            traceback.print_exc()  # Add traceback to see full error
+            print(f"Asymmetric dip fitting failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             
             # Return default values or create basic defaults
             if default_values is None:
                 default_values = {
                     "I0": np.mean(pixel_data),
-                    "f_center": np.mean(freq_axis),  # Use mean frequency as fallback
+                    "f_center": np.mean(freq_axis),
                 }
                 
                 # Add pair-specific defaults
@@ -2123,7 +1861,11 @@ class ODMRAnalyzer:
                     default_values[f"A_{i+1}_2"] = np.ptp(pixel_data) * 0.1
                     default_values[f"width_{i+1}_1"] = 0.006
                     default_values[f"width_{i+1}_2"] = 0.006
-                    default_values[f"f_delta_{i+1}"] = 0.010 + i * 0.005  # Different spacing for each pair
+                    default_values[f"f_offset_{i+1}_1"] = 0.005 + 0.005 * i
+                    default_values[f"f_offset_{i+1}_2"] = 0.005 + 0.005 * i
+                    default_values[f"f_pos_{i+1}_1"] = default_values["f_center"] - default_values[f"f_offset_{i+1}_1"]
+                    default_values[f"f_pos_{i+1}_2"] = default_values["f_center"] + default_values[f"f_offset_{i+1}_2"]
+                    default_values[f"f_delta_{i+1}"] = default_values[f"f_offset_{i+1}_1"] + default_values[f"f_offset_{i+1}_2"]
                 
                 # Add compatibility defaults
                 default_values["A"] = np.ptp(pixel_data) * 0.1
@@ -2135,7 +1877,7 @@ class ODMRAnalyzer:
 
     def fit_multi_lorentzian_with_fixed_center(self, n_pairs=2, method='trf', output_dir=None):
         """
-        Parallel version of multi-dip Lorentzian fitting using the fixed center approach.
+        Parallel version of multi-dip Lorentzian fitting using asymmetric dips approach.
         
         Args:
             n_pairs: Number of dip pairs to fit (fixed)
@@ -2162,7 +1904,11 @@ class ODMRAnalyzer:
             fitted_params[f"A_{i+1}_2"] = np.zeros((M, N))
             fitted_params[f"width_{i+1}_1"] = np.zeros((M, N))
             fitted_params[f"width_{i+1}_2"] = np.zeros((M, N))
-            fitted_params[f"f_delta_{i+1}"] = np.zeros((M, N))
+            fitted_params[f"f_offset_{i+1}_1"] = np.zeros((M, N))
+            fitted_params[f"f_offset_{i+1}_2"] = np.zeros((M, N))
+            fitted_params[f"f_pos_{i+1}_1"] = np.zeros((M, N))
+            fitted_params[f"f_pos_{i+1}_2"] = np.zeros((M, N))
+            fitted_params[f"f_delta_{i+1}"] = np.zeros((M, N))  # For compatibility
         
         # Add compatibility parameters
         fitted_params["A"] = np.zeros((M, N))
@@ -2181,7 +1927,11 @@ class ODMRAnalyzer:
             default_values[f"A_{i+1}_2"] = 0.1
             default_values[f"width_{i+1}_1"] = 0.006
             default_values[f"width_{i+1}_2"] = 0.006
-            default_values[f"f_delta_{i+1}"] = 0.010 + 0.005 * i  # Slightly different spacing
+            default_values[f"f_offset_{i+1}_1"] = 0.005 + 0.003 * i  # Left dip offset
+            default_values[f"f_offset_{i+1}_2"] = 0.005 + 0.003 * i  # Right dip offset
+            default_values[f"f_pos_{i+1}_1"] = default_values["f_center"] - default_values[f"f_offset_{i+1}_1"]
+            default_values[f"f_pos_{i+1}_2"] = default_values["f_center"] + default_values[f"f_offset_{i+1}_2"]
+            default_values[f"f_delta_{i+1}"] = default_values[f"f_offset_{i+1}_1"] + default_values[f"f_offset_{i+1}_2"]
         
         # Add compatibility defaults
         default_values["A"] = 0.1
@@ -2190,10 +1940,12 @@ class ODMRAnalyzer:
         default_values["quality_score"] = 0.0
 
         print(f"Processing {M*N} pixels using multiprocessing...")
-        print(f"Fitting model: {n_pairs} dip pair(s) with fixed center approach")
+        print(f"Fitting model: {n_pairs} dip pair(s) with asymmetric fixed center approach")
         
         num_cores = mp.cpu_count()
         print(f"Using {num_cores} CPU cores")
+        
+        
         
         # Process rows in parallel
         row_args = [(m, self.data, self.freq_axis, n_pairs, default_values, method) 
@@ -2206,7 +1958,7 @@ class ODMRAnalyzer:
         last_pixel_count = 0
         
         with mp.Pool(processes=num_cores) as pool:
-            for m, row_results in tqdm(pool.imap(process_pixel_row_with_fixed_center, row_args), 
+            for m, row_results in tqdm(pool.imap(process_pixel_row_with_asymmetric_dips, row_args), 
                                     total=M, 
                                     desc="Processing rows"):
                 for key in fitted_params:
@@ -2242,8 +1994,8 @@ class ODMRAnalyzer:
             os.makedirs(output_dir, exist_ok=True)
             
             base_name = os.path.splitext(os.path.basename(self.data_file))[0]
-            fitted_params_file = os.path.join(output_dir, f"{base_name}_fixed_center_params.npy")
-            quality_stats_file = os.path.join(output_dir, f"{base_name}_fixed_center_quality_stats.txt")
+            fitted_params_file = os.path.join(output_dir, f"{base_name}_asymmetric_params.npy")
+            quality_stats_file = os.path.join(output_dir, f"{base_name}_asymmetric_quality_stats.txt")
             
             # Save all parameters
             param_order = ['I0', 'f_center']
@@ -2253,13 +2005,17 @@ class ODMRAnalyzer:
                 param_order.extend([
                     f"A_{i+1}_1", f"A_{i+1}_2", 
                     f"width_{i+1}_1", f"width_{i+1}_2", 
+                    f"f_offset_{i+1}_1", f"f_offset_{i+1}_2",
+                    f"f_pos_{i+1}_1", f"f_pos_{i+1}_2",
                     f"f_delta_{i+1}"
                 ])
             
             # Add compatibility parameters
             param_order.extend(['A', 'width', 'f_delta', 'quality_score'])
             
-            stacked_params = np.stack([fitted_params[param] for param in param_order], axis=-1)
+            # Make sure all required parameters are present
+            final_param_order = [p for p in param_order if p in fitted_params]
+            stacked_params = np.stack([fitted_params[param] for param in final_param_order], axis=-1)
             np.save(fitted_params_file, stacked_params)
             
             # Also save a compatibility version with traditional parameter names
@@ -2275,13 +2031,13 @@ class ODMRAnalyzer:
             median_quality = np.median(quality_scores)
             
             with open(quality_stats_file, 'w') as f:
-                f.write(f"Fixed Center Multi-Dip Fitting Quality Statistics:\n")
+                f.write(f"Asymmetric Multi-Dip Fitting Quality Statistics:\n")
                 f.write(f"Success Rate (score >= 0.9): {success_rate:.1f}%\n")
                 f.write(f"Mean Quality Score: {mean_quality:.3f}\n")
                 f.write(f"Median Quality Score: {median_quality:.3f}\n")
                 
                 # Add performance metrics to the same file
-                f.write(f"\nODMR Fixed Center Fitting Performance Statistics:\n")
+                f.write(f"\nODMR Asymmetric Fitting Performance Statistics:\n")
                 f.write(f"Average speed: {performance_metrics['average_speed']:.2f} pixels/second\n")
                 f.write(f"Maximum speed: {performance_metrics['max_speed']:.2f} pixels/second\n")
                 f.write(f"Total computation time: {performance_metrics['total_computation_time']:.2f} seconds ({performance_metrics['total_computation_time']/60:.2f} minutes)\n")
@@ -2295,7 +2051,7 @@ class ODMRAnalyzer:
             
             print(f"\nSaved files in: {output_dir}")
             print(f"Saved:")
-            print(f"  - Fixed center parameters: {os.path.basename(fitted_params_file)}")
+            print(f"  - Asymmetric parameters: {os.path.basename(fitted_params_file)}")
             print(f"  - Compatible parameters: {os.path.basename(compat_params_file)}")
             print(f"  - Quality statistics: {os.path.basename(quality_stats_file)}")
             print(f"  - Original data: {os.path.basename(new_data_file)}")
@@ -2305,7 +2061,6 @@ class ODMRAnalyzer:
         
         self.stop_profiling()
         return None, None
-
 
 def main():
     data_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.npy"
