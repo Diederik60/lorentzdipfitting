@@ -1927,8 +1927,12 @@ class ODMRAnalyzer:
             fitted_params[f"f_offset_{i+1}_2"] = np.zeros((M, N))
             fitted_params[f"f_pos_{i+1}_1"] = np.zeros((M, N))
             fitted_params[f"f_pos_{i+1}_2"] = np.zeros((M, N))
-            fitted_params[f"f_delta_{i+1}"] = np.zeros((M, N))  # Total offset from center
-            fitted_params[f"peak_splitting_{i+1}"] = np.zeros((M, N))  # Distance between left and right dips
+            fitted_params[f"f_delta_{i+1}"] = np.zeros((M, N))  # For compatibility
+        
+        # Add compatibility parameters
+        fitted_params["A"] = np.zeros((M, N))
+        fitted_params["width"] = np.zeros((M, N))
+        fitted_params["f_delta"] = np.zeros((M, N))
         
         # Default values
         default_values = {
@@ -1947,8 +1951,11 @@ class ODMRAnalyzer:
             default_values[f"f_pos_{i+1}_1"] = default_values["f_center"] - default_values[f"f_offset_{i+1}_1"]
             default_values[f"f_pos_{i+1}_2"] = default_values["f_center"] + default_values[f"f_offset_{i+1}_2"]
             default_values[f"f_delta_{i+1}"] = default_values[f"f_offset_{i+1}_1"] + default_values[f"f_offset_{i+1}_2"]
-            default_values[f"peak_splitting_{i+1}"] = default_values[f"f_offset_{i+1}_1"] + default_values[f"f_offset_{i+1}_2"]
         
+        # Add compatibility defaults
+        default_values["A"] = 0.1
+        default_values["width"] = 0.006
+        default_values["f_delta"] = 0.010
         default_values["quality_score"] = 0.0
 
         print(f"Processing {M*N} pixels using multiprocessing...")
@@ -1973,14 +1980,6 @@ class ODMRAnalyzer:
             for m, row_results in tqdm(pool.imap(process_pixel_row_with_asymmetric_dips, row_args), 
                                     total=M, 
                                     desc="Processing rows"):
-                # Update the peak_splitting parameter calculation
-                # based on the actual fitted positions
-                for i in range(n_pairs):
-                    row_results[f"peak_splitting_{i+1}"] = (
-                        row_results[f"f_pos_{i+1}_2"] - row_results[f"f_pos_{i+1}_1"]
-                    )
-                    
-                # Update the fitted_params with all results
                 for key in fitted_params:
                     fitted_params[key][m] = row_results[key]
                 
@@ -2016,7 +2015,6 @@ class ODMRAnalyzer:
             base_name = os.path.splitext(os.path.basename(self.data_file))[0]
             fitted_params_file = os.path.join(output_dir, f"{base_name}_asymmetric_params.npy")
             quality_stats_file = os.path.join(output_dir, f"{base_name}_asymmetric_quality_stats.txt")
-            params_info_file = os.path.join(output_dir, f"{base_name}_parameter_info.json")
             
             # Save all parameters
             param_order = ['I0', 'f_center']
@@ -2028,46 +2026,22 @@ class ODMRAnalyzer:
                     f"width_{i+1}_1", f"width_{i+1}_2", 
                     f"f_offset_{i+1}_1", f"f_offset_{i+1}_2",
                     f"f_pos_{i+1}_1", f"f_pos_{i+1}_2",
-                    f"f_delta_{i+1}", f"peak_splitting_{i+1}"
+                    f"f_delta_{i+1}"
                 ])
             
-            # Add quality score as the final parameter
-            param_order.append('quality_score')
+            # Add compatibility parameters
+            param_order.extend(['A', 'width', 'f_delta', 'quality_score'])
             
             # Make sure all required parameters are present
             final_param_order = [p for p in param_order if p in fitted_params]
             stacked_params = np.stack([fitted_params[param] for param in final_param_order], axis=-1)
             np.save(fitted_params_file, stacked_params)
             
-            # Create parameter info dictionary for JSON
-            parameter_info = {
-                "parameter_order": final_param_order,
-                "parameter_descriptions": {
-                    "I0": "Baseline intensity (amplitude offset)",
-                    "f_center": "Central frequency between dip pairs",
-                    "quality_score": "Fit quality metric (0-1, higher is better)"
-                }
-            }
-            
-            # Add descriptions for each pair
-            for i in range(n_pairs):
-                pair_num = i + 1
-                parameter_info["parameter_descriptions"].update({
-                    f"A_{pair_num}_1": f"Amplitude of left dip in pair {pair_num}",
-                    f"A_{pair_num}_2": f"Amplitude of right dip in pair {pair_num}",
-                    f"width_{pair_num}_1": f"Width of left dip in pair {pair_num}",
-                    f"width_{pair_num}_2": f"Width of right dip in pair {pair_num}",
-                    f"f_offset_{pair_num}_1": f"Offset from center for left dip in pair {pair_num}",
-                    f"f_offset_{pair_num}_2": f"Offset from center for right dip in pair {pair_num}",
-                    f"f_pos_{pair_num}_1": f"Absolute frequency position of left dip in pair {pair_num}",
-                    f"f_pos_{pair_num}_2": f"Absolute frequency position of right dip in pair {pair_num}",
-                    f"f_delta_{pair_num}": f"Total offset from center (f_offset_{pair_num}_1 + f_offset_{pair_num}_2)",
-                    f"peak_splitting_{pair_num}": f"Distance between left and right dips in pair {pair_num} (f_pos_{pair_num}_2 - f_pos_{pair_num}_1)"
-                })
-            
-            # Save parameter info JSON
-            with open(params_info_file, 'w') as f:
-                json.dump(parameter_info, f, indent=4)
+            # Also save a compatibility version with traditional parameter names
+            compat_params_file = os.path.join(output_dir, f"{base_name}_compat_params.npy")
+            compat_param_order = ['I0', 'A', 'width', 'f_center', 'f_delta', 'quality_score']
+            compat_stacked = np.stack([fitted_params[param] for param in compat_param_order], axis=-1)
+            np.save(compat_params_file, compat_stacked)
             
             # Calculate and save quality statistics
             quality_scores = fitted_params['quality_score']
@@ -2097,7 +2071,7 @@ class ODMRAnalyzer:
             print(f"\nSaved files in: {output_dir}")
             print(f"Saved:")
             print(f"  - Asymmetric parameters: {os.path.basename(fitted_params_file)}")
-            print(f"  - Parameter information: {os.path.basename(params_info_file)}")
+            print(f"  - Compatible parameters: {os.path.basename(compat_params_file)}")
             print(f"  - Quality statistics: {os.path.basename(quality_stats_file)}")
             print(f"  - Original data: {os.path.basename(new_data_file)}")
             print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
