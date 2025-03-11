@@ -2118,9 +2118,9 @@ def main():
     while True:
         print("\nODMR Analysis Options:")
         print("1. Perform experiment fitting and save parameters")
-        print("2. Analyze single pixel spectrum")
-        print("3. Batch process directory")
-        print("4. Check fitted results")
+        # print("2. Analyze single pixel spectrum")
+        # print("3. Batch process directory")
+        # print("4. Check fitted results")
         print("5. Exit")
         
         choice = input("Enter your choice (1/2/3/4/5): ").strip()
