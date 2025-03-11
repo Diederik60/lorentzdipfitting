@@ -1173,6 +1173,7 @@ class ODMRAnalyzer:
         """
         inverted = -pixel_data_norm
         
+        #maybe cahnge this into prominence based on data range 
         # Try progressively lower prominence values to find all potential dips
         if prominence_levels is None:
             prominence_levels = [0.1, 0.05 ,0.02, 0.01, 0.005, 0.003, 0.002, 0.001, 0.0005, 0.0002]  # Add even lower levels
@@ -1199,9 +1200,75 @@ class ODMRAnalyzer:
                             'distance_from_center': abs(freq_axis[peak_idx] - center_freq)
                         }
                         all_dips.append(dip_info)
+
             except Exception as e:
                 print(f"Error finding peaks with prominence {prominence}: {e}")
                 continue
+
+            # This will help detect flat dips that prominence-based detection might miss
+            if len(all_dips) < max_pairs * 2:
+                try:
+                    # Apply Savitzky-Golay filter to smooth data before taking derivative
+                    from scipy.signal import savgol_filter
+                    window_length = min(11, len(pixel_data_norm)//2*2+1)  # Ensure odd window length
+                    smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
+                    
+                    # Calculate first derivative
+                    deriv = np.gradient(smoothed_data)
+                    
+                    # Calculate second derivative to find inflection points
+                    second_deriv = np.gradient(deriv)
+                    
+                    # Find negative second derivative regions (concave down) which indicate dips
+                    for i in range(1, len(second_deriv)-1):
+                        # Skip if we're at the edge of the frequency range
+                        if i < 3 or i > len(second_deriv) - 4:
+                            continue
+                            
+                        # Check for a negative second derivative and near-zero first derivative
+                        # (This indicates the bottom of a dip)
+                        if second_deriv[i] < -0.00001 and abs(deriv[i]) < 0.001:
+                            # Look for sign changes in first derivative around this point
+                            # (This confirms it's a minimum, not just noise)
+                            if deriv[i-1] < 0 and deriv[i+1] > 0:
+                                # Find the exact minimum within a small window
+                                local_window = pixel_data_norm[max(0, i-2):min(len(pixel_data_norm), i+3)]
+                                local_min_idx = np.argmin(local_window) + max(0, i-2)
+                                
+                                # Only proceed if this point is truly a local minimum
+                                if local_min_idx == i:
+                                    # Skip if already detected by prominence method
+                                    already_detected = False
+                                    for dip in all_dips:
+                                        if abs(dip['index'] - i) <= 2:  # Within 2 points
+                                            already_detected = True
+                                            break
+                                    
+                                    if not already_detected:
+                                        # Estimate prominence as the difference from nearby maxima
+                                        left_max = np.max(pixel_data_norm[max(0, i-10):i])
+                                        right_max = np.max(pixel_data_norm[i+1:min(len(pixel_data_norm), i+11)])
+                                        estimated_prominence = min(
+                                            left_max - pixel_data_norm[i],
+                                            right_max - pixel_data_norm[i]
+                                        )
+                                        
+                                        # Use a minimum prominence value to avoid noise
+                                        estimated_prominence = max(estimated_prominence, 0.0005)
+                                        
+                                        dip_info = {
+                                            'index': i,
+                                            'frequency': freq_axis[i],
+                                            'value': pixel_data_norm[i],
+                                            'prominence': estimated_prominence,
+                                            'distance_from_center': abs(freq_axis[i] - center_freq),
+                                            'detection_method': 'derivative'  # Mark as derivative-detected
+                                        }
+                                        all_dips.append(dip_info)
+                                        print(f"Derivative method found additional dip at {freq_axis[i]:.3f} GHz")
+                except Exception as e:
+                    print(f"Error in derivative-based dip detection: {e}")
+
         
         # If no dips found, return empty lists
         if not all_dips:
@@ -1383,8 +1450,8 @@ class ODMRAnalyzer:
         def estimate_width(idx, default_width=0.006):
             try:
                 # Look for points at half-prominence height
-                half_height = (I0_est + smoothed_data[idx]) / 2
-                left_idx, right_idx = idx, idx
+                height_fraction = 0.7  # Increased from 0.5
+                half_height = I0_est - (I0_est - smoothed_data[idx]) * height_fraction
                 
                 # Search left
                 while left_idx > 0 and smoothed_data[left_idx] < half_height:
