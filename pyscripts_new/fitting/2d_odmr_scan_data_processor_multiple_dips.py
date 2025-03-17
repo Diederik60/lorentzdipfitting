@@ -287,13 +287,59 @@ class ODMRFitChecker:
         self.n_pairs = (param_count - 3) // 9
         
         print(f"Detected {self.n_pairs} dip pairs from parameter count ({param_count})")
+
+               # Define parameter indices for easier reference
+        self.param_indices = {
+            'I0': 0,
+            'f_center': 1
+        }
+
+        # Add indices for pair-specific parameters
+        base_idx = 2
+        for i in range(1, self.n_pairs + 1):
+            self.param_indices[f'A_{i}_1'] = base_idx
+            self.param_indices[f'A_{i}_2'] = base_idx + 1
+            self.param_indices[f'width_{i}_1'] = base_idx + 2
+            self.param_indices[f'width_{i}_2'] = base_idx + 3
+            self.param_indices[f'f_offset_{i}_1'] = base_idx + 4
+            self.param_indices[f'f_offset_{i}_2'] = base_idx + 5
+            self.param_indices[f'f_pos_{i}_1'] = base_idx + 6
+            self.param_indices[f'f_pos_{i}_2'] = base_idx + 7
+            self.param_indices[f'f_delta_{i}'] = base_idx + 8
+            base_idx += 9  # 9 parameters per pair in the new model
+        
         
         # Extract quality scores (last parameter in the stack)
         self.quality_scores = self.fitted_params[:, :, -1]
+        self.fitting_params = self.fitted_params[:, :, :-1]
         
-        # Calculate success statistics
-        self.success_rate = np.mean(self.quality_scores >= 0.9) * 100
-        self.mean_quality = np.mean(self.quality_scores)
+        # Extract peak splitting values (in MHz) for threshold analysis
+        self.peak_splittings = self.get_outermost_splitting() * 1000  # Convert from GHz to MHz
+
+        # Calculate threshold using the improved method (with defaults)
+        self.quality_threshold, self.peak_splitting_range = self._analyze_and_suggest_threshold(
+            self.peak_splittings.flatten(), 
+            self.quality_scores.flatten(),
+            outlier_percentage=25,
+            min_quality_threshold=0.80
+        )
+
+        # Calculate success statistics using both criteria
+        lower_bound, upper_bound = self.peak_splitting_range
+
+        # Create success masks for different criteria
+        quality_mask = self.quality_scores >= self.quality_threshold
+        peak_mask = (self.peak_splittings >= lower_bound) & (self.peak_splittings <= upper_bound)
+        combined_mask = quality_mask & peak_mask
+
+        # Calculate success rates
+        self.success_rate_quality = np.mean(quality_mask) * 100
+        self.success_rate_combined = np.mean(combined_mask) * 100
+        self.success_mask = combined_mask  # Store for visualization
+        self.mean_quality = np.mean(self.quality_scores)  # Keep this as is
+
+        # For backward compatibility (remove later if not needed)
+        self.success_rate = self.success_rate_quality
         
         self.pl_map = np.mean(self.original_data, axis=2)
         # Calculate baseline (maximum value for each pixel)
@@ -315,32 +361,12 @@ class ODMRFitChecker:
         # Create cached averaged data dictionary
         self.averaged_data = {}
         
-       # Define parameter indices for easier reference
-        self.param_indices = {
-            'I0': 0,
-            'f_center': 1
-        }
-
-        # Add indices for pair-specific parameters
-        base_idx = 2
-        for i in range(1, self.n_pairs + 1):
-            self.param_indices[f'A_{i}_1'] = base_idx
-            self.param_indices[f'A_{i}_2'] = base_idx + 1
-            self.param_indices[f'width_{i}_1'] = base_idx + 2
-            self.param_indices[f'width_{i}_2'] = base_idx + 3
-            self.param_indices[f'f_offset_{i}_1'] = base_idx + 4
-            self.param_indices[f'f_offset_{i}_2'] = base_idx + 5
-            self.param_indices[f'f_pos_{i}_1'] = base_idx + 6
-            self.param_indices[f'f_pos_{i}_2'] = base_idx + 7
-            self.param_indices[f'f_delta_{i}'] = base_idx + 8
-            base_idx += 9  # 9 parameters per pair in the new model
-        
         # Define visualization options
         self.viz_options = {
             'Fit Quality': {
                 'data': self.quality_scores,
                 'cmap': 'RdYlGn',
-                'label': 'Fit Quality Score (0-1)'
+                'label': 'Fit Quality Score (NRMSE) (0-1)'
             },
             'PL Map': {
                 'data': self.pl_map,
@@ -399,6 +425,65 @@ class ODMRFitChecker:
 
         self._update_timer = None  # For debouncing
         self.averaged_data = {}    # For caching averaged data
+
+    def _analyze_and_suggest_threshold(self, peak_splittings, quality_scores, outlier_percentage=25, min_quality_threshold=0.80):
+        """
+        Analyze the relationship between quality scores and peak splittings
+        and suggest thresholds based on both metrics.
+        
+        Parameters:
+        -----------
+        peak_splittings : array-like
+            The peak splitting values (in MHz)
+        quality_scores : array-like
+            The quality scores (NMRSE)
+        outlier_percentage : float
+            The percentage deviation from mean to consider as an outlier
+        min_quality_threshold : float
+            Minimum quality score threshold regardless of peak splitting
+        
+        Returns:
+        --------
+        quality_threshold : float
+            Suggested threshold for quality score
+        peak_splitting_ranges : tuple
+            (lower_bound, upper_bound) for acceptable peak splitting values
+        """
+        # Calculate statistics for peak splitting
+        mean_splitting = np.mean(peak_splittings)
+        std_splitting = np.std(peak_splittings)
+        
+        # Calculate acceptable range for peak splitting values
+        deviation_percentage = outlier_percentage / 100.0
+        
+        # Calculate the allowed range
+        lower_bound = mean_splitting * (1 - deviation_percentage)
+        upper_bound = mean_splitting * (1 + deviation_percentage)
+        
+        # Find data points outside this range (peak splitting outliers)
+        outlier_mask = (peak_splittings < lower_bound) | (peak_splittings > upper_bound)
+        outliers_quality = quality_scores[outlier_mask]
+        
+        # Set quality threshold based on outliers
+        if len(outliers_quality) > 0:
+            # Find the lowest quality score among outliers
+            min_outlier_quality = np.min(outliers_quality)
+            
+            # Set the threshold just below this lowest outlier quality score (subtract a small buffer)
+            quality_threshold = min_outlier_quality - 0.001
+        else:
+            # If no outliers found, use a very permissive approach
+            # Set threshold very low to include nearly all fits
+            quality_threshold = np.min(quality_scores) - 0.005
+        
+        # Ensure quality threshold is at least the minimum
+        quality_threshold = max(quality_threshold, min_quality_threshold)
+        
+        # Round to 3 decimal places for cleaner reporting
+        quality_threshold = round(quality_threshold, 3)
+        
+        # Return both the quality threshold and the acceptable peak splitting range
+        return quality_threshold, (lower_bound, upper_bound)
 
     def calculate_total_contrast(self):
         """Calculate total contrast from all dip pairs"""
@@ -698,7 +783,7 @@ class ODMRFitChecker:
         self.x_slider = Slider(ax_x, 'X', 0, self.M-1, valinit=0, valstep=1)
         self.y_slider = Slider(ax_y, 'Y', 0, self.N-1, valinit=0, valstep=1)
         self.threshold_slider = Slider(
-            ax_threshold, 'Quality Threshold', 
+            ax_threshold, 'Averaging Threshold', 
             0.0, 1.0, valinit=self.quality_threshold,
             valstep=0.001
         )
@@ -872,7 +957,7 @@ class ODMRFitChecker:
             # Update titles and labels with proper coordinates
             self.ax_data.set_title(
                 f'Position: ({x_pos:.3f}, {y_pos:.3f})\n'
-                f'Quality Score: {self.quality_scores[self.x_idx, self.y_idx]:.3f}'
+                f'Quality Score (NRMSE): {self.quality_scores[self.x_idx, self.y_idx]:.3f}'
             )
 
             self.ax_map.set_xlabel('X Position (mm)')
@@ -902,9 +987,10 @@ class ODMRFitChecker:
             # Update axis limits
             self.update_axis_limits(y_data, fitted_curve, params)
             
+
             # Update map title
             self.ax_map.set_title(
-                f'Success Rate: {self.success_rate:.1f}%\n'
+                f'Success Rate: {self.success_rate_combined:.1f}%\n'
                 f'Mean Quality: {self.mean_quality:.3f}'
             )
             
@@ -2162,8 +2248,8 @@ class ODMRAnalyzer:
             with open(quality_stats_file, 'w') as f:
                 f.write(f"Asymmetric Multi-Dip Fitting Quality Statistics:\n")
                 f.write(f"Success Rate (score >= 0.9): {success_rate:.1f}%\n")
-                f.write(f"Mean Quality Score: {mean_quality:.3f}\n")
-                f.write(f"Median Quality Score: {median_quality:.3f}\n")
+                f.write(f"Mean Quality Score (NRMSE): {mean_quality:.3f}\n")
+                f.write(f"Median Quality Score (NRMSE): {median_quality:.3f}\n")
                 
                 # Add performance metrics to the same file
                 f.write(f"\nODMR Asymmetric Fitting Performance Statistics:\n")

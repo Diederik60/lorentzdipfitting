@@ -246,6 +246,7 @@ class ODMRFitChecker:
         
         # Create a mask where pixel is successful if quality score meets threshold AND 
         # peak splitting is within acceptable range
+        self.mean_quality = np.mean(self.quality_scores)
         quality_mask = self.quality_scores >= self.quality_threshold
         peak_mask = (self.peak_splittings >= lower_bound) & (self.peak_splittings <= upper_bound)
         combined_mask = quality_mask & peak_mask
@@ -814,7 +815,7 @@ class ODMRFitChecker:
             # Update map title
             self.ax_map.set_title(
                 f'Success Rate: {self.success_rate_combined:.1f}%\n'
-                #f'Success Rate (Quality): {self.success_rate_quality:.1f}%'
+                f'Mean Quality: {self.mean_quality:.3f}'
             )
             
             # Force a complete redraw
