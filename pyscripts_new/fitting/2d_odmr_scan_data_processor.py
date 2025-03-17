@@ -16,54 +16,7 @@ from pathlib import Path
 import re
 from matplotlib.widgets import Slider, Button, RadioButtons
 from matplotlib.colors import LogNorm, Normalize
-'''
 
-Statistics of data provided by Dylan, this data is concerns 20x20x100 2D ODMR scan data
-
-Parameter statistics:
-                 I0              A         width      f_center       f_delta
-count  2.560000e+04   25600.000000  25600.000000  25600.000000  2.560000e+04
-mean   4.608335e+05   28471.238802      0.006178      2.871805  3.546591e-02
-std    4.529519e+05   25914.354677      0.004521      0.008753  1.671464e-02
-min    6.029727e+04      93.602962      0.000064      2.820555  3.344105e-09
-25%    1.525285e+05    7803.165582      0.004589      2.869750  3.079085e-02
-50%    2.024858e+05   23177.294963      0.005706      2.870441  3.653382e-02
-75%    8.490758e+05   36695.043713      0.006545      2.878413  4.990010e-02
-max    1.442024e+06  250318.277408      0.140000      2.940000  1.344750e-01
-
-
-'''
-
-
-def organize_experiment_files(experiment_number, original_data_file, original_json_file, fitted_params_file, base_output_dir):
-    """
-    Organize experiment files by copying them to a dedicated experiment directory.
-    """
-    # Create experiment-specific directory
-    experiment_dir = os.path.join(base_output_dir, f"experiment_{experiment_number}")
-    os.makedirs(experiment_dir, exist_ok=True)
-    
-    # Define new file paths - now directly in the experiment directory
-    new_data_file = os.path.join(experiment_dir, os.path.basename(original_data_file))
-    new_json_file = os.path.join(experiment_dir, os.path.basename(original_json_file))
-    new_params_file = os.path.join(experiment_dir, os.path.basename(fitted_params_file))
-    
-    # Copy files to new location
-    import shutil
-    shutil.copy2(original_data_file, new_data_file)
-    shutil.copy2(original_json_file, new_json_file)
-    
-    # For the fitted params, we might need to move rather than copy if it's temporary
-    if os.path.exists(fitted_params_file):
-        shutil.move(fitted_params_file, new_params_file)
-    
-    print(f"\nOrganized experiment files in: {experiment_dir}")
-    print(f"Copied:")
-    print(f"  - Original data file")
-    print(f"  - JSON parameters file")
-    print(f"  - Fitted parameters file")
-    
-    return new_data_file, new_json_file, new_params_file
 
 def get_experiment_number(filename):
     """Extract experiment number from filename with format '2D_ODMR_scan_{number}.npy'"""
@@ -824,32 +777,6 @@ class ODMRAnalyzer:
         )
         self.mean_spectrum = np.mean(self.data, axis=(0, 1))
 
-
-    def check_fits(self, fitted_params_file):
-        """
-        Launch the interactive fit checker for the current experiment
-        
-        Args:
-            fitted_params_file (str): Path to the saved fitted parameters
-        """
-        checker = ODMRFitChecker(fitted_params_file, self.data_file, self.json_file)
-        checker.create_interactive_viewer()
-
-    #separate method for loading the data to see how much time is spent doing that    
-    @timing_decorator
-    def load_data(self, data_file, json_file):
-        """Load data and parameters with timing measurement"""
-        self.data = np.load(data_file)
-        with open(json_file, 'r') as f:
-            self.params = json.load(f)
-        
-        self.freq_axis = np.linspace(
-            self.params['min_freq'] / 1e9,
-            self.params['max_freq'] / 1e9,
-            self.params['num_measurements']
-        )
-        self.mean_spectrum = np.mean(self.data, axis=(0, 1))
-
     #methods for profiling
     def start_profiling(self):
         """Start profiling if enabled"""
@@ -875,21 +802,6 @@ class ODMRAnalyzer:
         """
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
     
-    # lorentzian double dip function with log scaling
-    @staticmethod
-    def double_dip_func_full_log(f, log_I0, log_A, log_width, log_f_center, log_f_delta):
-        """
-        Double Lorentzian dip function with all parameters in logarithmic space
-        """
-        # Convert all parameters from log space
-        I0 = np.exp(log_I0)
-        A = np.exp(log_A)
-        width = np.exp(log_width)
-        f_center = np.exp(log_f_center)
-        f_delta = np.exp(log_f_delta)
-        
-        return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
-    
     #hybrid version for log scaling, f_center and f_delta are linear because the range allows it
     @staticmethod
     def double_dip_func_hybrid(f, log_I0, log_A, log_width, f_center, f_delta):
@@ -905,87 +817,6 @@ class ODMRAnalyzer:
         # Calculate double dip
         return I0 - A/(1 + ((f_center - 0.5*f_delta - f)/width)**2) - \
             A/(1 + ((f_center + 0.5*f_delta - f)/width)**2)
-
-
-    @staticmethod
-    def find_outer_dips(freq_axis, pixel_data_norm):
-        """Find the outermost dips in a spectrum that may contain multiple dip pairs"""
-        inverted = -pixel_data_norm
-        
-        # Try different prominence levels to find dips
-        prominence_levels = [0.01, 0.005, 0.002]
-        all_peaks = []
-        
-        for prominence in prominence_levels:
-            peaks, properties = find_peaks(inverted, prominence=prominence, 
-                                        width=2, distance=3)
-            if len(peaks) >= 2:
-                # Sort peaks by prominence
-                peak_prominences = properties['prominences']
-                peak_positions = freq_axis[peaks]
-                
-                # Filter peaks that are too close to the edges
-                edge_margin = (freq_axis[-1] - freq_axis[0]) * 0.05
-                valid_peaks = peaks[
-                    (peak_positions > freq_axis[0] + edge_margin) & 
-                    (peak_positions < freq_axis[-1] - edge_margin)
-                ]
-                
-                if len(valid_peaks) >= 2:
-                    # Find the leftmost and rightmost prominent peaks
-                    leftmost_idx = valid_peaks[0]
-                    rightmost_idx = valid_peaks[-1]
-                    
-                    # Only accept if the peaks form a reasonable pair
-                    min_separation = (freq_axis[-1] - freq_axis[0]) * 0.1
-                    if freq_axis[rightmost_idx] - freq_axis[leftmost_idx] >= min_separation:
-                        return np.array([leftmost_idx, rightmost_idx])
-                    
-        return np.array([])
-
-    @staticmethod
-    def estimate_parameters_from_dips(freq_axis, pixel_data_norm, dips):
-        """Modified parameter estimation focusing on outer dips"""
-        # Physics-based constraints
-        TYPICAL_WIDTH = 0.006
-        MIN_SPLITTING = 0.010
-        MAX_SPLITTING = 0.150
-        
-        # Calculate frequency range and mean
-        freq_range = freq_axis[-1] - freq_axis[0]
-        mean_freq = np.mean(freq_axis)
-        
-        # Baseline estimation using 95th percentile
-        I0_est = np.percentile(pixel_data_norm, 95)
-        
-        # Apply Savitzky-Golay filter
-        window_length = min(11, len(pixel_data_norm)//2*2+1)
-        smoothed_data = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=3)
-        
-        if len(dips) >= 2:
-            # Use outermost dips
-            f_dip_1, f_dip_2 = sorted([freq_axis[d] for d in [dips[0], dips[-1]]])
-            f_center_est = (f_dip_1 + f_dip_2) / 2
-            f_delta_est = f_dip_2 - f_dip_1
-            
-            # Calculate width and amplitude from outer dips
-            outer_depths = [I0_est - smoothed_data[d] for d in [dips[0], dips[-1]]]
-            width_est = TYPICAL_WIDTH
-            A_est = np.mean(outer_depths)
-            
-        else:
-            # Fallback to default values
-            f_center_est = 2.87
-            f_delta_est = MIN_SPLITTING
-            width_est = TYPICAL_WIDTH
-            A_est = 0.1 * np.ptp(pixel_data_norm)
-        
-        # Apply constraints
-        width_est = np.clip(width_est, TYPICAL_WIDTH*0.5, TYPICAL_WIDTH*2)
-        f_delta_est = np.clip(f_delta_est, MIN_SPLITTING, MAX_SPLITTING)
-        f_center_est = np.clip(f_center_est, mean_freq - 0.1, mean_freq + 0.1)
-        
-        return I0_est, A_est, width_est, f_center_est, f_delta_est
 
     @staticmethod
     def fit_single_pixel(pixel_data, freq_axis, default_values=None, method='trf'):
@@ -1175,99 +1006,6 @@ class ODMRAnalyzer:
                 "f_delta": 0.010
             }
 
-    # method for widefield odmr                
-    @staticmethod
-    def fit_single_pixel_widefield(pixel_data, freq_axis, default_values=None, method='trf'):
-        """
-        Simplified fitting function specifically for widefield ODMR with low SNR.
-        Prioritizes speed and robustness over accuracy.
-        """
-        # Quick check for very low signal pixels
-        if np.max(pixel_data) < 0.1:
-            return default_values
-        
-        # Simple normalization - no need for complex scaling
-        pixel_data_norm = pixel_data / np.max(pixel_data)
-        
-        # Apply heavy smoothing to handle low SNR
-        window_length = min(31, len(pixel_data_norm)//2*2+1)  # Larger window for more smoothing
-        smoothed = savgol_filter(pixel_data_norm, window_length=window_length, polyorder=2)
-        
-        # Use simpler peak finding with relaxed criteria
-        inverted = -smoothed
-        peaks, _ = find_peaks(inverted, prominence=0.005, distance=5)
-        
-        # Very simple parameter estimation
-        I0_est = 1.0  # Since we normalized
-        
-        if len(peaks) >= 2:
-            # Just take the two deepest dips
-            main_peaks = peaks[np.argsort(inverted[peaks])[-2:]]
-            f_dip_1, f_dip_2 = sorted([freq_axis[idx] for idx in main_peaks])
-            f_center_est = (f_dip_1 + f_dip_2) / 2
-            f_delta_est = f_dip_2 - f_dip_1
-            A_est = 0.1  # Simplified amplitude estimate
-        else:
-            # Default parameters centered around typical NV values
-            f_center_est = 2.87
-            f_delta_est = 0.01
-            A_est = 0.1
-        
-        # Use fixed width for simplicity
-        width_est = 0.006
-        
-        # Very relaxed bounds for fitting
-        bounds = (
-            # Lower bounds - much more relaxed
-            [np.log(0.1), np.log(0.001), np.log(0.001), 2.7, 0.001],
-            # Upper bounds - wide range
-            [np.log(10.0), np.log(1.0), np.log(0.1), 3.0, 0.3]
-        )
-        
-        # Initial parameters
-        p0 = [
-            np.log(I0_est),
-            np.log(A_est),
-            np.log(width_est),
-            f_center_est,
-            f_delta_est
-        ]
-        
-        try:
-            # Quick fit with relaxed convergence criteria
-            popt, _ = curve_fit(
-                ODMRAnalyzer.double_dip_func_hybrid,
-                freq_axis,
-                pixel_data_norm,
-                p0=p0,
-                bounds=bounds,
-                method=method,
-                maxfev=1000,    # Reduced iterations
-                ftol=1e-2,      # Very relaxed tolerance
-                xtol=1e-2       # Very relaxed tolerance
-            )
-            
-            # Convert back to original scale
-            return {
-                "I0": np.exp(popt[0]) * np.max(pixel_data),
-                "A": np.exp(popt[1]) * np.max(pixel_data),
-                "width": np.exp(popt[2]),
-                "f_center": popt[3],
-                "f_delta": popt[4]
-            }
-            
-        except Exception as e:
-            # Return default values if fit fails
-            if default_values is None:
-                default_values = {
-                    "I0": np.mean(pixel_data),
-                    "A": 0.1 * np.max(pixel_data),
-                    "width": 0.006,
-                    "f_center": 2.87,
-                    "f_delta": 0.01
-                }
-            return default_values
-
     @timing_decorator    
     def fit_double_lorentzian(self, method='trf', output_dir=None):
         """
@@ -1442,69 +1180,6 @@ class ODMRAnalyzer:
         ax.legend()
         plt.tight_layout()
         return fig, ax
-
-    def plot_contrast_map(self, fitted_params=None):
-        """
-        Create a 2D heat map of the ODMR contrast
-        
-        Args:
-            fitted_params (dict, optional): Use fitted parameters for contrast calculation
-        """
-        # Calculate contrast based on data or fitted parameters
-        if fitted_params is None:
-            contrast_map = np.ptp(self.data, axis=2)
-        else:
-            # Use amplitude from fitted parameters as contrast measure
-            contrast_map = fitted_params['A']
-        
-        fig, ax = plt.subplots(figsize=(10, 8))
-        im = ax.imshow(contrast_map.T, origin='lower', cmap='viridis',
-                      extent=[self.params['x1'], self.params['x2'],
-                             self.params['y1'], self.params['y2']])
-        plt.colorbar(im, ax=ax, label='Contrast')
-        ax.set_xlabel('X Position (mm)')
-        ax.set_ylabel('Y Position (mm)')
-        ax.set_title('ODMR Contrast Map')
-        return fig, ax, contrast_map
-
-    def save_fitted_parameters(self, fitted_params, base_output_dir):
-        """
-        Save fitted parameters and organize related files in a single experiment directory.
-        
-        This method creates a directory structure like:
-        base_output_dir/
-            experiment_[number]/
-                lorentzian_params_[number].npy
-                2D_ODMR_scan_[number].npy
-                2D_ODMR_scan_[number].json
-        """
-        # Create the experiment-specific directory
-        experiment_dir = os.path.join(base_output_dir, f"experiment_{self.experiment_number}")
-        os.makedirs(experiment_dir, exist_ok=True)
-        
-        # Define all file paths within the experiment directory
-        params_file = os.path.join(experiment_dir, f"lorentzian_params_{self.experiment_number}.npy")
-        new_data_file = os.path.join(experiment_dir, os.path.basename(self.data_file))
-        new_json_file = os.path.join(experiment_dir, os.path.basename(self.json_file))
-        
-        # Save the fitted parameters
-        param_order = ['I0', 'A', 'width', 'f_center', 'f_delta']
-        stacked_params = np.stack([fitted_params[param] for param in param_order], axis=-1)
-        np.save(params_file, stacked_params)
-        
-        # Copy the original data files
-        import shutil
-        shutil.copy2(self.data_file, new_data_file)
-        shutil.copy2(self.json_file, new_json_file)
-        
-        print(f"\nOrganized experiment files in: {experiment_dir}")
-        print(f"Saved:")
-        print(f"  - Fitted parameters: {os.path.basename(params_file)}")
-        print(f"  - Original data: {os.path.basename(new_data_file)}")
-        print(f"  - JSON parameters: {os.path.basename(new_json_file)}")
-        print(f"Saved array shape: {stacked_params.shape}")
-        
-        return experiment_dir, params_file
     
     def analyze_spectrum(self, x, y, fitted_params=None):
         """
@@ -1555,8 +1230,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.json"
 
     # Initialize analyzer at the start
     analyzer = None
