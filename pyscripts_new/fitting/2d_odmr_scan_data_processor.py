@@ -187,7 +187,8 @@ def print_performance_metrics(total_processed, start_time, speed_samples=None):
     }
 
 class ODMRFitChecker:
-    def __init__(self, fitted_params_file, original_data_file, json_params_file):
+    def __init__(self, fitted_params_file, original_data_file, json_params_file, 
+                 outlier_percentage=25, min_quality_threshold=0.80):
         """Initialize with quality assessment capabilities"""
         # Load the fitted parameters (shape: M x N x 6 now, including quality score)
         self.fitted_params = np.load(fitted_params_file)
@@ -224,9 +225,37 @@ class ODMRFitChecker:
         # Extract quality scores (last parameter in the stack)
         self.quality_scores = self.fitted_params[:, :, -1]
         
-        # Calculate success statistics
-        self.success_rate = np.mean(self.quality_scores >= 0.9) * 100
-        self.mean_quality = np.mean(self.quality_scores)
+        # Store the fitting parameters and quality scores separately
+        # First 5 columns are fitting parameters, last column is quality score
+        self.fitting_params = self.fitted_params[:, :, :5]  # Extract only fitting parameters
+        self.quality_scores = self.fitted_params[:, :, -1]  # Extract quality scores
+        
+        # Extract peak splitting values (5th parameter, index 4) and convert from GHz to MHz
+        self.peak_splittings = self.fitting_params[:, :, 4] * 1000  # Convert to MHz
+        
+        # Calculate threshold using the new method
+        self.quality_threshold, self.peak_splitting_range = self._analyze_and_suggest_threshold(
+            self.peak_splittings.flatten(), 
+            self.quality_scores.flatten(),
+            outlier_percentage=outlier_percentage,
+            min_quality_threshold=min_quality_threshold
+        )
+        
+        # Calculate success statistics using both criteria
+        lower_bound, upper_bound = self.peak_splitting_range
+        
+        # Create a mask where pixel is successful if quality score meets threshold AND 
+        # peak splitting is within acceptable range
+        quality_mask = self.quality_scores >= self.quality_threshold
+        peak_mask = (self.peak_splittings >= lower_bound) & (self.peak_splittings <= upper_bound)
+        combined_mask = quality_mask & peak_mask
+        
+        # Calculate success rates with different criteria
+        self.success_rate_quality = np.mean(quality_mask) * 100
+        self.success_rate_combined = np.mean(combined_mask) * 100
+        
+        # Store the combined success mask for visualization
+        self.success_mask = combined_mask
         
         self.pl_map = np.mean(self.original_data, axis=2)
         # Calculate baseline (maximum value for each pixel)
@@ -236,14 +265,8 @@ class ODMRFitChecker:
         # Calculate contrast as percentage: (max-min)/max * 100
         self.raw_contrast = (baseline - min_val) / baseline * 100
 
-        # Store the fitting parameters and quality scores separately
-        # First 5 columns are fitting parameters, last column is quality score
-        self.fitting_params = self.fitted_params[:, :, :5]  # Extract only fitting parameters
-        self.quality_scores = self.fitted_params[:, :, -1]  # Extract quality scores
-
         # Add new parameters for neighborhood averaging
         self.enable_averaging = False  # Toggle for neighborhood averaging
-        self.quality_threshold = 0.80  # Quality score threshold
         
         # Create cached averaged data dictionary
         self.averaged_data = {}
@@ -253,14 +276,18 @@ class ODMRFitChecker:
             'Fit Quality': {
                 'data': self.quality_scores,
                 'cmap': 'RdYlGn',
-                'label': 'Fit Quality Score (0-1)'
+                'label': 'Fit Quality Score (NRMSE) (0-1)'
+            },
+            'Success Map': {
+                'data': self.success_mask.astype(float),
+                'cmap': 'RdYlGn',
+                'label': 'Successful Fits (Combined Criteria)'
             },
             'PL Map': {
                 'data': self.pl_map,
                 'cmap': 'viridis',
                 'label': 'PL Intensity (a.u.)'
             },
-            # Replace with:
             'Raw Contrast': {
                 'data': self.raw_contrast,
                 'cmap': 'viridis',
@@ -272,9 +299,9 @@ class ODMRFitChecker:
                 'label': 'Fitted Contrast (%)'
             },
             'Peak Splitting': {
-                'data': self.fitting_params[:, :, 4] * 1000,  # Convert from GHz to MHz
+                'data': self.peak_splittings,  # Already converted to MHz
                 'cmap': 'magma',
-                'label': 'Peak Splitting (MHz)'  # Update label to show MHz
+                'label': 'Peak Splitting (MHz)'
             },
             'Frequency Shift': {
                 'data': self.fitting_params[:, :, 3],
@@ -303,6 +330,65 @@ class ODMRFitChecker:
 
         self._update_timer = None  # For debouncing
         self.averaged_data = {}    # For caching averaged data
+
+    def _analyze_and_suggest_threshold(self, peak_splittings, quality_scores, outlier_percentage=25, min_quality_threshold=0.80):
+        """
+        Analyze the relationship between quality scores and peak splittings
+        and suggest thresholds based on both metrics.
+        
+        Parameters:
+        -----------
+        peak_splittings : array-like
+            The peak splitting values (in MHz)
+        quality_scores : array-like
+            The quality scores (NMRSE)
+        outlier_percentage : float
+            The percentage deviation from mean to consider as an outlier
+        min_quality_threshold : float
+            Minimum quality score threshold regardless of peak splitting
+        
+        Returns:
+        --------
+        quality_threshold : float
+            Suggested threshold for quality score
+        peak_splitting_ranges : tuple
+            (lower_bound, upper_bound) for acceptable peak splitting values
+        """
+        # Calculate statistics for peak splitting
+        mean_splitting = np.mean(peak_splittings)
+        std_splitting = np.std(peak_splittings)
+        
+        # Calculate acceptable range for peak splitting values
+        deviation_percentage = outlier_percentage / 100.0
+        
+        # Calculate the allowed range
+        lower_bound = mean_splitting * (1 - deviation_percentage)
+        upper_bound = mean_splitting * (1 + deviation_percentage)
+        
+        # Find data points outside this range (peak splitting outliers)
+        outlier_mask = (peak_splittings < lower_bound) | (peak_splittings > upper_bound)
+        outliers_quality = quality_scores[outlier_mask]
+        
+        # Set quality threshold based on outliers
+        if len(outliers_quality) > 0:
+            # Find the lowest quality score among outliers
+            min_outlier_quality = np.min(outliers_quality)
+            
+            # Set the threshold just below this lowest outlier quality score (subtract a small buffer)
+            quality_threshold = min_outlier_quality - 0.001
+        else:
+            # If no outliers found, use a very permissive approach
+            # Set threshold very low to include nearly all fits
+            quality_threshold = np.min(quality_scores) - 0.005
+        
+        # Ensure quality threshold is at least the minimum
+        quality_threshold = max(quality_threshold, min_quality_threshold)
+        
+        # Round to 3 decimal places for cleaner reporting
+        quality_threshold = round(quality_threshold, 3)
+        
+        # Return both the quality threshold and the acceptable peak splitting range
+        return quality_threshold, (lower_bound, upper_bound)
 
     def double_lorentzian(self, f, I0, A, width, f_center, f_delta):
         """Calculate double Lorentzian function with given parameters."""
@@ -512,7 +598,7 @@ class ODMRFitChecker:
         self.x_slider = Slider(ax_x, 'X', 0, self.M-1, valinit=0, valstep=1)
         self.y_slider = Slider(ax_y, 'Y', 0, self.N-1, valinit=0, valstep=1)
         self.threshold_slider = Slider(
-            ax_threshold, 'Quality Threshold', 
+            ax_threshold, 'Averaging Threshold', 
             0.0, 1.0, valinit=self.quality_threshold,
             valstep=0.001
         )
@@ -695,7 +781,7 @@ class ODMRFitChecker:
             # Update titles and labels with proper coordinates
             self.ax_data.set_title(
                 f'Position: ({x_pos:.3f}, {y_pos:.3f})\n'
-                f'Quality Score: {self.quality_scores[self.x_idx, self.y_idx]:.3f}'
+                f'Quality Score (NRMSE): {self.quality_scores[self.x_idx, self.y_idx]:.3f}'
             )
 
             self.ax_map.set_xlabel('X Position (mm)')
@@ -727,8 +813,8 @@ class ODMRFitChecker:
             
             # Update map title
             self.ax_map.set_title(
-                f'Success Rate: {self.success_rate:.1f}%\n'
-                f'Mean Quality: {self.mean_quality:.3f}'
+                f'Success Rate: {self.success_rate_combined:.1f}%\n'
+                #f'Success Rate (Quality): {self.success_rate_quality:.1f}%'
             )
             
             # Force a complete redraw
@@ -1097,8 +1183,8 @@ class ODMRAnalyzer:
         with open(quality_stats_file, 'w') as f:
             f.write(f"Fitting Quality Statistics:\n")
             f.write(f"Success Rate (score >= 0.9): {success_rate:.1f}%\n")
-            f.write(f"Mean Quality Score: {mean_quality:.3f}\n")
-            f.write(f"Median Quality Score: {median_quality:.3f}\n")
+            f.write(f"Mean Quality Score (NRMSE): {mean_quality:.3f}\n")
+            f.write(f"Median Quality Score (NRMSE): {median_quality:.3f}\n")
             
             # Add performance metrics to the same file
             f.write(f"\nODMR Fitting Performance Statistics:\n")
@@ -1230,8 +1316,8 @@ class ODMRAnalyzer:
     
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\oct-nov-2024 biosample\2D_ODMR_scan_1731005879.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\june 2024\scan 12 june\2D ODMR scan 2024-06-12 17_56_37.304382.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\june 2024\scan 12 june\2D ODMR scan 2024-06-12 17_56_37.304382.json"
 
     # Initialize analyzer at the start
     analyzer = None
