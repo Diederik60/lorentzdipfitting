@@ -645,7 +645,7 @@ class ODMRFitChecker:
         self.y_margin_factor = 0.05  # Factor for dynamic margin calculation
 
     def initialize_plots(self):
-        """Initialize all plot elements"""
+        """Initialize all plot elements with centered marker"""
         # Create spectrum plot
         y_data = self.original_data[self.x_idx, self.y_idx]
         self.spectrum_line, = self.ax_data.plot(self.freq_axis, y_data, 'b.', label='Data')
@@ -661,21 +661,31 @@ class ODMRFitChecker:
         
         # Create map visualization
         viz_data = self.get_averaged_data(self.current_viz)
+        
+        # Calculate x and y pixel sizes
+        x_pixel_size = (self.params['x2'] - self.params['x1']) / (self.params['x_steps'] - 1)
+        y_pixel_size = (self.params['y2'] - self.params['y1']) / (self.params['y_steps'] - 1)
+        
+        # Calculate the extent with half-pixel offset to center pixels
+        extent = [
+            self.params['x1'] - x_pixel_size/2,  # Left edge
+            self.params['x2'] + x_pixel_size/2,  # Right edge
+            self.params['y1'] - y_pixel_size/2,  # Bottom edge
+            self.params['y2'] + y_pixel_size/2   # Top edge
+        ]
+        
         self.map_img = self.ax_map.imshow(
             viz_data.T,
             origin='lower',
-            extent=[
-                self.params['x1'],  # Left edge
-                self.params['x2'],  # Right edge
-                self.params['y1'],  # Bottom edge
-                self.params['y2']   # Top edge
-            ],
+            extent=extent,
             cmap=self.viz_options[self.current_viz]['cmap'],
             aspect='equal'
         )
+        
+        # Place marker at exact coordinates
         x_pos = self.x_axis[self.x_idx]
         y_pos = self.y_axis[self.y_idx]
-        self.pixel_marker, = self.ax_map.plot(x_pos, y_pos, 'rx')
+        self.pixel_marker, = self.ax_map.plot(x_pos, y_pos, 'rx', markersize=8, markeredgewidth=2)
                 
         # Add colorbar
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
@@ -861,16 +871,24 @@ class ODMRFitChecker:
     def _on_map_click(self, event):
         """Handle mouse clicks on the map with proper coordinate conversion"""
         if event.inaxes == self.ax_map:
-            # Convert clicked coordinates to nearest pixel indices
+            # Calculate x and y pixel sizes
+            x_pixel_size = (self.params['x2'] - self.params['x1']) / (self.params['x_steps'] - 1)
+            y_pixel_size = (self.params['y2'] - self.params['y1']) / (self.params['y_steps'] - 1)
+            
+            # Find the closest pixel center to the clicked position
             x_idx = np.argmin(np.abs(self.x_axis - event.xdata))
             y_idx = np.argmin(np.abs(self.y_axis - event.ydata))
             
-            if 0 <= x_idx < self.M and 0 <= y_idx < self.N:
-                self.x_idx = x_idx
-                self.y_idx = y_idx
-                self.x_slider.set_val(x_idx)
-                self.y_slider.set_val(y_idx)
-                self.force_update()
+            # Ensure indices are within bounds
+            x_idx = max(0, min(x_idx, self.M - 1))
+            y_idx = max(0, min(y_idx, self.N - 1))
+            
+            # Update indices and UI
+            self.x_idx = x_idx
+            self.y_idx = y_idx
+            self.x_slider.set_val(x_idx)
+            self.y_slider.set_val(y_idx)
+            self.force_update()
 
     def update_colorbar(self):
         """Update the colorbar for the current visualization"""
@@ -935,7 +953,7 @@ class ODMRFitChecker:
         return param_str
 
     def force_update(self):
-        """Force a complete update of all plot elements"""
+        """Force a complete update of all plot elements with accurate marker positioning"""
         try:
             # Update data plot
             y_data = self.original_data[self.x_idx, self.y_idx]
@@ -949,7 +967,7 @@ class ODMRFitChecker:
             viz_data = self.get_averaged_data(self.current_viz)
             self.map_img.set_data(viz_data.T)
 
-            # Update marker position with real coordinates
+            # Update marker position with exact coordinates for the current pixel
             x_pos = self.x_axis[self.x_idx]
             y_pos = self.y_axis[self.y_idx]
             self.pixel_marker.set_data([x_pos], [y_pos])
@@ -987,7 +1005,6 @@ class ODMRFitChecker:
             # Update axis limits
             self.update_axis_limits(y_data, fitted_curve, params)
             
-
             # Update map title
             self.ax_map.set_title(
                 f'Success Rate: {self.success_rate_combined:.1f}%\n'
@@ -1000,6 +1017,7 @@ class ODMRFitChecker:
             
         except Exception as e:
             print(f"Error during update: {str(e)}")
+
 
     def handle_close(self, event):
         """Clean up resources when the figure is closed"""
@@ -1869,7 +1887,7 @@ class ODMRAnalyzer:
             
 
             # After creating p0 and before setting bounds, add:
-            print(f"p0 values: {p0}")  # Debug to see actual initial values
+            # print(f"p0 values: {p0}")  # Debug to see actual initial values
             
             # BOUNDS SECTION --------------------------------------------------------------------------------------------------------------------------------------------------------------------------
             # Set bounds for TRF method
@@ -1928,7 +1946,7 @@ class ODMRAnalyzer:
                         ])
                 
                 # Add a check to verify bounds and parameters match
-                print(f"Debug - Parameters: {len(p0)}, Lower bounds: {len(lower_bounds)}, Upper bounds: {len(upper_bounds)}")
+                # print(f"Debug - Parameters: {len(p0)}, Lower bounds: {len(lower_bounds)}, Upper bounds: {len(upper_bounds)}")
                 
                 for i in range(len(p0)):
                     if i < len(lower_bounds) and i < len(upper_bounds):
