@@ -19,41 +19,6 @@ from matplotlib.colors import LogNorm, Normalize
 import traceback
 
 
-def organize_experiment_files(experiment_number, original_data_file, original_json_file, fitted_params_file, base_output_dir):
-    """
-    Organize experiment files by copying them to a dedicated experiment directory.
-    """
-    # Create experiment-specific directory
-    experiment_dir = os.path.join(base_output_dir, f"experiment_{experiment_number}")
-    os.makedirs(experiment_dir, exist_ok=True)
-    
-    # Define new file paths - now directly in the experiment directory
-    new_data_file = os.path.join(experiment_dir, os.path.basename(original_data_file))
-    new_json_file = os.path.join(experiment_dir, os.path.basename(original_json_file))
-    new_params_file = os.path.join(experiment_dir, os.path.basename(fitted_params_file))
-    
-    # Copy files to new location
-    import shutil
-    shutil.copy2(original_data_file, new_data_file)
-    shutil.copy2(original_json_file, new_json_file)
-    
-    # For the fitted params, we might need to move rather than copy if it's temporary
-    if os.path.exists(fitted_params_file):
-        shutil.move(fitted_params_file, new_params_file)
-    
-    print(f"\nOrganized experiment files in: {experiment_dir}")
-    print(f"Copied:")
-    print(f"  - Original data file")
-    print(f"  - JSON parameters file")
-    print(f"  - Fitted parameters file")
-    
-    return new_data_file, new_json_file, new_params_file
-
-def get_experiment_number(filename):
-    """Extract experiment number from filename with format '2D_ODMR_scan_{number}.npy'"""
-    pattern = r'2D_ODMR_scan_(\d+)\.npy$'
-    match = re.search(pattern, filename)
-    return int(match.group(1)) if match else None
 
 def process_directory(directory, method='trf', output_dir='./fitted_parameters', use_multi_dip=False, n_pairs=1):
     """
@@ -119,18 +84,6 @@ def process_directory(directory, method='trf', output_dir='./fitted_parameters',
     
     print(f"\nBatch processing complete. Successfully processed {success_count}/{len(npy_files)} files.")
     print(f"Results saved in {output_dir}")
-
-def timing_decorator(func):
-    """Decorator to measure function execution time"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        execution_time = end_time - start_time
-        print(f"{func.__name__} took {execution_time:.4f} seconds to execute")
-        return result
-    return wrapper
 
 def calculate_fit_quality(original_data, fitted_curve):
     """
@@ -245,7 +198,6 @@ def process_pixel_row_with_asymmetric_dips(args):
                         row_results[key][n] = value
     
     return m, row_results
-
 
 class ODMRFitChecker:
     def __init__(self, fitted_params_file, original_data_file, json_params_file):
@@ -2297,8 +2249,8 @@ class ODMRAnalyzer:
         return None, None
 
 def main():
-    data_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.npy"
-    json_file = r"C:\Users\Diederik\Documents\BEP\PB_diamond_data\2D_ODMR_scan_1733764788.json"
+    data_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024-prebonded sample\2D_ODMR_scan_1731758979.npy"
+    json_file = r"C:\Users\Diederik\Documents\BEP\measurement_stuff_new\nov-2024-prebonded sample\2D_ODMR_scan_1731758979.json"
 
     analyzer = None
     if os.path.exists(data_file) and os.path.exists(json_file):

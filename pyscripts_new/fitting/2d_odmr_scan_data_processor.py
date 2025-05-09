@@ -301,8 +301,10 @@ class ODMRFitChecker:
             },
             'Peak Splitting': {
                 'data': self.peak_splittings,  # Already converted to MHz
-                'cmap': 'magma',
-                'label': 'Peak Splitting (MHz)'
+                'cmap': 'viridis',
+                'label': 'Peak Splitting (MHz)',
+                'interpolation' : "nearest"
+
             },
             'Frequency Shift': {
                 'data': self.fitting_params[:, :, 3],
@@ -505,10 +507,15 @@ class ODMRFitChecker:
         x_pos = self.x_axis[self.x_idx]
         y_pos = self.y_axis[self.y_idx]
         self.pixel_marker, = self.ax_map.plot(x_pos, y_pos, 'rx')
-                
+
+        # Increase font size for axis values (tick labels)
+        self.ax_map.tick_params(axis='both', which='major', labelsize=14)
+        self.ax_data.tick_params(axis='both', which='major', labelsize=14) 
+
         # Add colorbar
         self.colorbar = plt.colorbar(self.map_img, ax=self.ax_map)
-        self.colorbar.set_label(self.viz_options[self.current_viz]['label'])
+        self.colorbar.set_label(self.viz_options[self.current_viz]['label'], fontsize=14)
+        self.colorbar.ax.tick_params(labelsize=14)
 
     def create_interactive_viewer(self):
         """Create interactive viewer with improved update handling"""
@@ -536,8 +543,8 @@ class ODMRFitChecker:
         self.ax_data.set_xlabel('Frequency (GHz)')
         self.ax_data.set_ylabel('ODMR Signal (a.u.)')
         self.ax_data.legend()
-        self.ax_map.set_xlabel('X Position')
-        self.ax_map.set_ylabel('Y Position')
+        self.ax_map.set_xlabel('X Position', fontsize=14)
+        self.ax_map.set_ylabel('Y Position',fontsize=14)
         
         # Create UI elements with improved positioning
         self._create_sliders()
@@ -829,7 +836,6 @@ class ODMRFitChecker:
         """Clean up resources when the figure is closed"""
         plt.close(self.fig)
 
-
 class ODMRAnalyzer:
     def __init__(self, data_file, json_file, enable_profiling=False):
         """
@@ -999,7 +1005,7 @@ class ODMRAnalyzer:
             #     [np.log(10.0), np.log(1.0), np.log(0.1), 2.96, 0.16]      # and splitting
             # )
 
-            #widefield
+            
             bounds = (
                 # Lower bounds
                 [np.log(0.0001),# Allow for very low baseline (previously 0.1)
